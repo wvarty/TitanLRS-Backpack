@@ -271,6 +271,274 @@ static void GetConfiguration(AsyncWebServerRequest *request)
   request->send(response);
 }
 
+//=========================================================
+// CRSF Parameters - MOCK DATA IMPLEMENTATION
+//=========================================================
+
+// TODO: Replace with real CRSF protocol implementation
+// This is mock data for testing the web interface
+
+static void HandleCRSFScan(AsyncWebServerRequest *request)
+{
+  // MOCK: Simulating CRSF device discovery
+  // In real implementation:
+  // 1. Send DEVICE_PING (0x28) broadcast over Serial to TX module
+  // 2. Wait 2 seconds for DEVICE_INFO (0x29) responses
+  // 3. Parse responses and build device list
+
+  JsonDocument json;
+  JsonArray devices = json.to<JsonArray>();
+
+  // MOCK Device 1: RM Ranger
+  JsonObject device1 = devices.add<JsonObject>();
+  device1["name"] = "RM Ranger";
+  device1["address"] = 0xEE;
+  device1["serialNumber"] = 1162629715;
+  device1["hardwareId"] = 0;
+  device1["firmwareId"] = 262144;
+  device1["parametersTotal"] = 33;
+  device1["parameterVersion"] = 0;
+  device1["online"] = true;
+
+  // MOCK Device 2: RM XR4 (selected in screenshot)
+  JsonObject device2 = devices.add<JsonObject>();
+  device2["name"] = "RM XR4";
+  device2["address"] = 0xEC;
+  device2["serialNumber"] = 1162629715;
+  device2["hardwareId"] = 0;
+  device2["firmwareId"] = 262144;
+  device2["parametersTotal"] = 13;
+  device2["parameterVersion"] = 0;
+  device2["online"] = true;
+
+  AsyncResponseStream *response = request->beginResponseStream("application/json");
+  serializeJson(json, *response);
+  request->send(response);
+}
+
+static void HandleCRSFParams(AsyncWebServerRequest *request)
+{
+  // MOCK: Simulating parameter loading
+  // In real implementation:
+  // 1. Send PARAM_READ (0x2C) for each parameter number
+  // 2. Receive PARAM_ENTRY (0x2B) chunks
+  // 3. Parse parameter data based on type
+
+  if (!request->hasParam("device")) {
+    request->send(400, "text/plain", "Missing device parameter");
+    return;
+  }
+
+  int deviceAddress = request->getParam("device")->value().toInt();
+
+  // MOCK: Only return params for RM XR4 (0xEC = 236)
+  if (deviceAddress != 0xEC && deviceAddress != 236) {
+    JsonDocument json;
+    JsonArray params = json.to<JsonArray>();
+    AsyncResponseStream *response = request->beginResponseStream("application/json");
+    serializeJson(json, *response);
+    request->send(response);
+    return;
+  }
+
+  // MOCK: RM XR4 Parameters (matching screenshot)
+  JsonDocument json;
+  JsonArray params = json.to<JsonArray>();
+
+  // Parameter 1: Protocol (TEXT_SELECTION)
+  JsonObject p1 = params.add<JsonObject>();
+  p1["paramNumber"] = 1;
+  p1["parentFolder"] = 0;
+  p1["type"] = 0x09; // TEXT_SELECTION
+  p1["isHidden"] = false;
+  p1["name"] = "Protocol";
+  JsonArray p1opts = p1["options"].to<JsonArray>();
+  p1opts.add("CRSF");
+  p1opts.add("Inversion");
+  p1opts.add("Off");
+  p1["value"] = 0; // CRSF
+  p1["min"] = 0;
+  p1["max"] = 2;
+  p1["default"] = 0;
+  p1["unit"] = "";
+
+  // Parameter 2: Protocol2 (TEXT_SELECTION)
+  JsonObject p2 = params.add<JsonObject>();
+  p2["paramNumber"] = 2;
+  p2["parentFolder"] = 0;
+  p2["type"] = 0x09; // TEXT_SELECTION
+  p2["isHidden"] = false;
+  p2["name"] = "Protocol2";
+  JsonArray p2opts = p2["options"].to<JsonArray>();
+  p2opts.add("Off");
+  p2opts.add("CRSF");
+  p2opts.add("Inversion");
+  p2["value"] = 0; // Off
+  p2["min"] = 0;
+  p2["max"] = 2;
+  p2["default"] = 0;
+  p2["unit"] = "";
+
+  // Parameter 3: SBUS failsafe (TEXT_SELECTION)
+  JsonObject p3 = params.add<JsonObject>();
+  p3["paramNumber"] = 3;
+  p3["parentFolder"] = 0;
+  p3["type"] = 0x09; // TEXT_SELECTION
+  p3["isHidden"] = false;
+  p3["name"] = "SBUS failsafe";
+  JsonArray p3opts = p3["options"].to<JsonArray>();
+  p3opts.add("No Pulses");
+  p3opts.add("Last Position");
+  p3["value"] = 0; // No Pulses
+  p3["min"] = 0;
+  p3["max"] = 1;
+  p3["default"] = 0;
+  p3["unit"] = "";
+
+  // Parameter 4: Tlm Power (UINT8)
+  JsonObject p4 = params.add<JsonObject>();
+  p4["paramNumber"] = 4;
+  p4["parentFolder"] = 0;
+  p4["type"] = 0x00; // UINT8
+  p4["isHidden"] = false;
+  p4["name"] = "Tlm Power";
+  p4["value"] = 100;
+  p4["min"] = 0;
+  p4["max"] = 250;
+  p4["default"] = 100;
+  p4["unit"] = "mW";
+
+  // Parameter 5: Team Race (COMMAND)
+  JsonObject p5 = params.add<JsonObject>();
+  p5["paramNumber"] = 5;
+  p5["parentFolder"] = 0;
+  p5["type"] = 0x0D; // COMMAND
+  p5["isHidden"] = false;
+  p5["name"] = "Team Race";
+  p5["status"] = 0;
+  p5["timeout"] = 0;
+
+  // Parameter 6: Bind Storage (TEXT_SELECTION)
+  JsonObject p6 = params.add<JsonObject>();
+  p6["paramNumber"] = 6;
+  p6["parentFolder"] = 0;
+  p6["type"] = 0x09; // TEXT_SELECTION
+  p6["isHidden"] = false;
+  p6["name"] = "Bind Storage";
+  JsonArray p6opts = p6["options"].to<JsonArray>();
+  p6opts.add("Persistent");
+  p6opts.add("Volatile");
+  p6["value"] = 0; // Persistent
+  p6["min"] = 0;
+  p6["max"] = 1;
+  p6["default"] = 0;
+  p6["unit"] = "";
+
+  // Parameter 7: Enter Bind Mode (COMMAND)
+  JsonObject p7 = params.add<JsonObject>();
+  p7["paramNumber"] = 7;
+  p7["parentFolder"] = 0;
+  p7["type"] = 0x0D; // COMMAND
+  p7["isHidden"] = false;
+  p7["name"] = "Enter Bind Mode";
+  p7["status"] = 0;
+  p7["timeout"] = 0;
+
+  // Parameter 8: Model Id (TEXT_SELECTION)
+  JsonObject p8 = params.add<JsonObject>();
+  p8["paramNumber"] = 8;
+  p8["parentFolder"] = 0;
+  p8["type"] = 0x09; // TEXT_SELECTION
+  p8["isHidden"] = false;
+  p8["name"] = "Model Id";
+  JsonArray p8opts = p8["options"].to<JsonArray>();
+  p8opts.add("Off");
+  p8opts.add("1");
+  p8opts.add("2");
+  p8opts.add("3");
+  p8["value"] = 0; // Off
+  p8["min"] = 0;
+  p8["max"] = 3;
+  p8["default"] = 0;
+  p8["unit"] = "";
+
+  // Parameter 9: tx-usb-crsf (INFO)
+  JsonObject p9 = params.add<JsonObject>();
+  p9["paramNumber"] = 9;
+  p9["parentFolder"] = 0;
+  p9["type"] = 0x0C; // INFO
+  p9["isHidden"] = false;
+  p9["name"] = "tx-usb-crsf";
+  p9["value"] = "79edc1";
+
+  AsyncResponseStream *response = request->beginResponseStream("application/json");
+  serializeJson(json, *response);
+  request->send(response);
+}
+
+static void HandleCRSFParamWrite(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+{
+  // MOCK: Simulating parameter write
+  // In real implementation:
+  // 1. Parse JSON request body
+  // 2. Serialize parameter value based on type
+  // 3. Send PARAM_WRITE (0x2D) frame over Serial
+  // 4. Wait for acknowledgment
+
+  // Parse JSON body
+  JsonDocument json;
+  DeserializationError error = deserializeJson(json, data, len);
+
+  if (error) {
+    request->send(400, "text/plain", "Invalid JSON");
+    return;
+  }
+
+  int deviceAddress = json["device"];
+  int paramNumber = json["paramNumber"];
+  // JsonVariant value = json["value"]; // Would use this in real implementation
+
+  DBGLN("MOCK: Write param %d on device 0x%02X", paramNumber, deviceAddress);
+
+  // TODO: Real implementation would:
+  // 1. Get parameter type from stored parameters
+  // 2. Serialize value based on type (uint8, float, string, etc.)
+  // 3. Build CRSF PARAM_WRITE frame
+  // 4. Send via Serial to TX module
+  // 5. Wait for acknowledgment
+
+  request->send(200, "text/plain", "OK");
+}
+
+static void HandleCRSFParamExecute(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+{
+  // MOCK: Simulating command execution
+  // In real implementation:
+  // 1. Parse JSON request body
+  // 2. Send PARAM_WRITE (0x2D) for command parameter
+  // 3. Wait for acknowledgment
+
+  JsonDocument json;
+  DeserializationError error = deserializeJson(json, data, len);
+
+  if (error) {
+    request->send(400, "text/plain", "Invalid JSON");
+    return;
+  }
+
+  int deviceAddress = json["device"];
+  int paramNumber = json["paramNumber"];
+
+  DBGLN("MOCK: Execute command param %d on device 0x%02X", paramNumber, deviceAddress);
+
+  // TODO: Real implementation would send PARAM_WRITE frame for command
+
+  request->send(200, "text/plain", "OK");
+}
+
+// END CRSF Parameters MOCK
+//=========================================================
+
 static void WebUpdateSendNetworks(AsyncWebServerRequest *request)
 {
   int numNetworks = WiFi.scanComplete();
@@ -714,6 +982,12 @@ static void startServices()
 #if defined(MAVLINK_ENABLED)
   server.on("/mavlink", HTTP_GET, WebMAVLinkHandler);
 #endif
+
+  // CRSF Parameters endpoints (MOCK implementation for testing)
+  server.on("/crsf/scan", HTTP_GET, HandleCRSFScan);
+  server.on("/crsf/params", HTTP_GET, HandleCRSFParams);
+  server.on("/crsf/param/write", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, HandleCRSFParamWrite);
+  server.on("/crsf/param/execute", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, HandleCRSFParamExecute);
 
   server.onNotFound(WebUpdateHandleNotFound);
 

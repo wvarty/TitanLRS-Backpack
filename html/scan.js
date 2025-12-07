@@ -7,6 +7,7 @@ function _(el) {
 function init() {
     initAat();
     initMavLink();
+    initCRSFParams(); // Initialize CRSF parameters tab
 
     // sends XMLHttpRequest, so do it last
     initOptions();
@@ -803,4 +804,421 @@ function calibrationOn() {
 function calibrationOff() {
     _('main').classList.remove('loading');
     mui.overlay('off');
+}
+
+//=========================================================
+// CRSF Parameters
+//=========================================================
+
+// CRSF Protocol Constants
+const CRSF_FRAMETYPE_DEVICE_PING = 0x28;
+const CRSF_FRAMETYPE_DEVICE_INFO = 0x29;
+const CRSF_FRAMETYPE_PARAM_ENTRY = 0x2B;
+const CRSF_FRAMETYPE_PARAM_READ = 0x2C;
+const CRSF_FRAMETYPE_PARAM_WRITE = 0x2D;
+
+// Parameter Types
+const PARAM_TYPE = {
+    UINT8: 0x00,
+    INT8: 0x01,
+    UINT16: 0x02,
+    INT16: 0x03,
+    UINT32: 0x04,
+    INT32: 0x05,
+    FLOAT: 0x08,
+    TEXT_SELECTION: 0x09,
+    STRING: 0x0A,
+    FOLDER: 0x0B,
+    INFO: 0x0C,
+    COMMAND: 0x0D
+};
+
+const PARAM_HIDDEN = 0x80;
+
+// Global state
+let crsfDevices = [];
+let selectedDevice = null;
+let crsfParameters = [];
+let currentFolder = 0;
+let currentParameterChunks = [];
+let parameterQueue = [];
+let isLoadingParameters = false;
+
+// Initialize CRSF parameters on page load
+function initCRSFParams() {
+    if (!_('scan_devices')) return;
+
+    _('scan_devices').addEventListener('click', scanForDevices);
+    _('reload_params').addEventListener('click', reloadParameters);
+    _('params_back').addEventListener('click', navigateBack);
+}
+
+// Scan for CRSF devices
+function scanForDevices() {
+    _('scan_devices').disabled = true;
+    _('scan_devices').textContent = 'Scanning...';
+    _('device_list').innerHTML = '<p style="color: #999; text-align: center;">Scanning for devices...</p>';
+
+    // Send scan request to C++ backend
+    // The backend should send DEVICE_PING frames and collect DEVICE_INFO responses
+    const xhr = new XMLHttpRequest();
+    xhr.onreadystatechange = function() {
+        if (this.readyState == 4) {
+            _('scan_devices').disabled = false;
+            _('scan_devices').textContent = 'Scan for Devices';
+
+            if (this.status == 200) {
+                const devices = JSON.parse(this.responseText);
+                handleDevicesDiscovered(devices);
+            } else {
+                _('device_list').innerHTML = '<p style="color: #f44336;">Error scanning for devices. Make sure TX module is connected.</p>';
+            }
+        }
+    };
+    xhr.open('GET', '/crsf/scan', true);
+    xhr.send();
+}
+
+// Handle discovered devices
+function handleDevicesDiscovered(devices) {
+    crsfDevices = devices;
+
+    if (devices.length === 0) {
+        _('device_list').innerHTML = '<p style="color: #999; text-align: center;">No devices found</p>';
+        return;
+    }
+
+    let html = '<div style="margin-top: 10px;">';
+    devices.forEach((device, index) => {
+        const statusClass = device.online ? 'success-bg' : '';
+        const statusText = device.online ? 'Online' : 'Offline';
+
+        html += `
+            <div class="device-item" onclick="selectDevice(${index})" style="
+                padding: 12px;
+                margin-bottom: 8px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                cursor: pointer;
+                background: ${selectedDevice && selectedDevice.address === device.address ? '#e3f2fd' : '#fff'};
+            ">
+                <div style="font-weight: bold; margin-bottom: 4px;">${device.name}</div>
+                <div style="font-size: 0.85em; color: #666;">
+                    ID: 0x${device.address.toString(16).toUpperCase()}<br/>
+                    S/N: ${device.serialNumber.toString(16).toUpperCase()}<br/>
+                    Params: ${device.parametersTotal}
+                </div>
+                <div style="margin-top: 6px;">
+                    <span style="
+                        display: inline-block;
+                        padding: 2px 8px;
+                        font-size: 0.75em;
+                        border-radius: 3px;
+                        background: ${device.online ? '#4caf50' : '#999'};
+                        color: white;
+                    ">${statusText}</span>
+                </div>
+            </div>
+        `;
+    });
+    html += '</div>';
+
+    _('device_list').innerHTML = html;
+}
+
+// Select a device and load its parameters
+function selectDevice(index) {
+    selectedDevice = crsfDevices[index];
+    currentFolder = 0;
+    crsfParameters = [];
+
+    // Update device list UI
+    handleDevicesDiscovered(crsfDevices);
+
+    // Update parameters panel
+    _('params_device_name').textContent = selectedDevice.name;
+    _('reload_params').disabled = false;
+    _('params_breadcrumb').style.display = 'none';
+
+    // Load all parameters
+    loadAllParameters();
+}
+
+// Load all parameters for the selected device
+function loadAllParameters() {
+    if (!selectedDevice) return;
+
+    _('params_content').innerHTML = '<p style="color: #999; text-align: center; margin-top: 50px;">Loading parameters...</p>';
+    isLoadingParameters = true;
+
+    const xhr = new XMLHttpRequest();
+    xhr.onreadystatechange = function() {
+        if (this.readyState == 4) {
+            isLoadingParameters = false;
+
+            if (this.status == 200) {
+                const params = JSON.parse(this.responseText);
+                crsfParameters = params;
+                renderCurrentFolder();
+            } else {
+                _('params_content').innerHTML = '<p style="color: #f44336;">Error loading parameters</p>';
+            }
+        }
+    };
+    xhr.open('GET', `/crsf/params?device=${selectedDevice.address}`, true);
+    xhr.send();
+}
+
+// Reload parameters
+function reloadParameters() {
+    loadAllParameters();
+}
+
+// Render parameters in current folder
+function renderCurrentFolder() {
+    const folderParams = crsfParameters.filter(p => p.parentFolder === currentFolder && !p.isHidden);
+
+    // Update breadcrumb
+    if (currentFolder === 0) {
+        _('params_breadcrumb').style.display = 'none';
+    } else {
+        _('params_breadcrumb').style.display = 'block';
+        const folderParam = crsfParameters.find(p => p.paramNumber === currentFolder);
+        _('params_path').textContent = folderParam ? folderParam.name : 'Folder';
+    }
+
+    if (folderParams.length === 0) {
+        _('params_content').innerHTML = '<p style="color: #999; text-align: center; margin-top: 50px;">No parameters in this folder</p>';
+        return;
+    }
+
+    let html = '<table class="mui-table" style="width: 100%;">';
+
+    folderParams.forEach(param => {
+        html += `<tr><td style="width: 40%; font-weight: 500;">${param.name}</td><td>`;
+        html += renderParameter(param);
+        html += '</td></tr>';
+    });
+
+    html += '</table>';
+    _('params_content').innerHTML = html;
+}
+
+// Render a single parameter based on its type
+function renderParameter(param) {
+    switch (param.type) {
+        case PARAM_TYPE.UINT8:
+        case PARAM_TYPE.INT8:
+        case PARAM_TYPE.UINT16:
+        case PARAM_TYPE.INT16:
+        case PARAM_TYPE.UINT32:
+        case PARAM_TYPE.INT32:
+            return renderNumericParameter(param);
+
+        case PARAM_TYPE.FLOAT:
+            return renderFloatParameter(param);
+
+        case PARAM_TYPE.TEXT_SELECTION:
+            return renderTextSelectionParameter(param);
+
+        case PARAM_TYPE.STRING:
+            return renderStringParameter(param);
+
+        case PARAM_TYPE.FOLDER:
+            return renderFolderParameter(param);
+
+        case PARAM_TYPE.COMMAND:
+            return renderCommandParameter(param);
+
+        case PARAM_TYPE.INFO:
+            return renderInfoParameter(param);
+
+        default:
+            return `<span style="color: #999;">Unknown type</span>`;
+    }
+}
+
+// Render numeric parameter
+function renderNumericParameter(param) {
+    const unit = param.unit ? ` <span style="color: #666; font-size: 0.9em;">${param.unit}</span>` : '';
+    return `
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <input type="number"
+                value="${param.value}"
+                min="${param.min}"
+                max="${param.max}"
+                onchange="updateParameter(${param.paramNumber}, parseInt(this.value))"
+                style="flex: 1; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+            ${unit}
+            <span style="color: #999; font-size: 0.85em;">[${param.min}-${param.max}]</span>
+        </div>
+    `;
+}
+
+// Render float parameter
+function renderFloatParameter(param) {
+    const step = param.stepSize || 0.1;
+    const decimals = param.decimalPoint || 2;
+    const unit = param.unit ? ` <span style="color: #666; font-size: 0.9em;">${param.unit}</span>` : '';
+    return `
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <input type="number"
+                value="${param.value.toFixed(decimals)}"
+                min="${param.min}"
+                max="${param.max}"
+                step="${step}"
+                onchange="updateParameter(${param.paramNumber}, parseFloat(this.value))"
+                style="flex: 1; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+            ${unit}
+            <span style="color: #999; font-size: 0.85em;">[${param.min.toFixed(decimals)}-${param.max.toFixed(decimals)}]</span>
+        </div>
+    `;
+}
+
+// Render text selection parameter
+function renderTextSelectionParameter(param) {
+    const unit = param.unit ? ` <span style="color: #666; font-size: 0.9em;">${param.unit}</span>` : '';
+    let html = `
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <select onchange="updateParameter(${param.paramNumber}, parseInt(this.value))"
+                style="flex: 1; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+    `;
+
+    param.options.forEach((option, index) => {
+        const selected = index === param.value ? 'selected' : '';
+        html += `<option value="${index}" ${selected}>${option}</option>`;
+    });
+
+    html += `</select>${unit}</div>`;
+    return html;
+}
+
+// Render string parameter
+function renderStringParameter(param) {
+    return `
+        <input type="text"
+            value="${param.value}"
+            maxlength="${param.maxLength}"
+            onchange="updateParameter(${param.paramNumber}, this.value)"
+            style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+    `;
+}
+
+// Render folder parameter
+function renderFolderParameter(param) {
+    return `
+        <button class="mui-btn mui-btn--small" onclick="enterFolder(${param.paramNumber})">
+            Enter
+        </button>
+    `;
+}
+
+// Render command parameter
+function renderCommandParameter(param) {
+    return `
+        <button class="mui-btn mui-btn--small mui-btn--primary" onclick="executeCommand(${param.paramNumber})">
+            Execute
+        </button>
+    `;
+}
+
+// Render info parameter
+function renderInfoParameter(param) {
+    return `<span style="color: #666;">${param.value || 'N/A'}</span>`;
+}
+
+// Enter a folder
+function enterFolder(paramNumber) {
+    currentFolder = paramNumber;
+    renderCurrentFolder();
+}
+
+// Navigate back to parent folder
+function navigateBack() {
+    if (currentFolder === 0) return;
+
+    const currentFolderParam = crsfParameters.find(p => p.paramNumber === currentFolder);
+    if (currentFolderParam) {
+        currentFolder = currentFolderParam.parentFolder;
+        renderCurrentFolder();
+    }
+}
+
+// Update a parameter value
+function updateParameter(paramNumber, value) {
+    const param = crsfParameters.find(p => p.paramNumber === paramNumber);
+    if (!param) return;
+
+    // Update local value
+    param.value = value;
+
+    // Send update to backend
+    const xhr = new XMLHttpRequest();
+    xhr.onreadystatechange = function() {
+        if (this.readyState == 4) {
+            if (this.status == 200) {
+                cuteAlert({
+                    type: 'success',
+                    title: 'Parameter Updated',
+                    message: `${param.name} updated successfully`
+                });
+            } else {
+                cuteAlert({
+                    type: 'error',
+                    title: 'Update Failed',
+                    message: `Failed to update ${param.name}`
+                });
+            }
+        }
+    };
+
+    xhr.open('POST', '/crsf/param/write', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(JSON.stringify({
+        device: selectedDevice.address,
+        paramNumber: paramNumber,
+        value: value
+    }));
+}
+
+// Execute a command parameter
+function executeCommand(paramNumber) {
+    const param = crsfParameters.find(p => p.paramNumber === paramNumber);
+    if (!param) return;
+
+    cuteAlert({
+        type: 'question',
+        title: 'Execute Command',
+        message: `Execute "${param.name}"?`,
+        confirmText: 'Execute',
+        cancelText: 'Cancel'
+    }).then((result) => {
+        if (result === 'confirm') {
+            const xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function() {
+                if (this.readyState == 4) {
+                    if (this.status == 200) {
+                        cuteAlert({
+                            type: 'success',
+                            title: 'Command Executed',
+                            message: `${param.name} executed successfully`
+                        });
+                    } else {
+                        cuteAlert({
+                            type: 'error',
+                            title: 'Execution Failed',
+                            message: `Failed to execute ${param.name}`
+                        });
+                    }
+                }
+            };
+
+            xhr.open('POST', '/crsf/param/execute', true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.send(JSON.stringify({
+                device: selectedDevice.address,
+                paramNumber: paramNumber
+            }));
+        }
+    });
 }
