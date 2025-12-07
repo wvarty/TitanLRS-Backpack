@@ -138,7 +138,7 @@ function updateConfig(data) {
         }
     }
     if((!data.stm32 || data.stm32==="no") && _('tx_tab')) {
-        mui.tabs.activate('pane-justified-2');
+        mui.tabs.activate('pane-justified-5');
         _('tx_tab').style.display = 'none';
     }
     if(config['product_name'] && _('product_name')) _('product_name').textContent = config['product_name'];
