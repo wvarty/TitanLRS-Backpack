@@ -35,6 +35,9 @@
 
 #include "config.h"
 
+// CRSF Parameters support
+#include "CrsfParams.h"
+
 #if defined(MAVLINK_ENABLED)
 #include <MAVLink.h>
 #endif
@@ -272,271 +275,356 @@ static void GetConfiguration(AsyncWebServerRequest *request)
 }
 
 //=========================================================
-// CRSF Parameters - MOCK DATA IMPLEMENTATION
+// CRSF Parameters - Real Implementation
 //=========================================================
 
-// TODO: Replace with real CRSF protocol implementation
-// This is mock data for testing the web interface
+// State for async CRSF operations
+static AsyncWebServerRequest* pendingCRSFRequest = nullptr;
+static std::vector<CRSFDeviceInfo> discoveredDevices;
+static std::vector<CRSFParamInfo> loadedParameters;
+static uint8_t pendingDeviceAddress = 0;
+static uint8_t pendingParamCount = 0;
+
+// Serialize a parameter to JSON
+static void paramToJson(JsonObject& obj, const CRSFParamInfo& param) {
+    obj["paramNumber"] = param.paramNumber;
+    obj["parentFolder"] = param.parentFolder;
+    obj["type"] = param.type;
+    obj["isHidden"] = param.isHidden;
+    obj["name"] = param.name;
+    
+    switch (param.type) {
+        case CRSF_PARAM_TYPE_UINT8:
+        case CRSF_PARAM_TYPE_INT8:
+        case CRSF_PARAM_TYPE_UINT16:
+        case CRSF_PARAM_TYPE_INT16:
+        case CRSF_PARAM_TYPE_UINT32:
+        case CRSF_PARAM_TYPE_INT32:
+            obj["value"] = param.numValue;
+            obj["min"] = param.numMin;
+            obj["max"] = param.numMax;
+            obj["default"] = param.numDefault;
+            obj["unit"] = param.unit;
+            break;
+            
+        case CRSF_PARAM_TYPE_FLOAT:
+            obj["value"] = param.floatValue;
+            obj["min"] = param.floatMin;
+            obj["max"] = param.floatMax;
+            obj["default"] = param.floatDefault;
+            obj["decimalPoint"] = param.decimalPoint;
+            obj["stepSize"] = param.stepSize;
+            obj["unit"] = param.unit;
+            break;
+            
+        case CRSF_PARAM_TYPE_TEXT_SELECTION:
+            {
+                // Split semicolon-separated options into array
+                JsonArray opts = obj["options"].to<JsonArray>();
+                char optionsCopy[256];
+                strncpy(optionsCopy, param.options, sizeof(optionsCopy) - 1);
+                optionsCopy[sizeof(optionsCopy) - 1] = '\0';
+                
+                char* token = strtok(optionsCopy, ";");
+                while (token != nullptr) {
+                    opts.add(token);
+                    token = strtok(nullptr, ";");
+                }
+                
+                obj["value"] = param.selectValue;
+                obj["min"] = param.selectMin;
+                obj["max"] = param.selectMax;
+                obj["default"] = param.selectDefault;
+                obj["unit"] = param.unit;
+            }
+            break;
+            
+        case CRSF_PARAM_TYPE_STRING:
+            obj["value"] = param.stringValue;
+            obj["maxLength"] = param.stringMaxLength;
+            break;
+            
+        case CRSF_PARAM_TYPE_FOLDER:
+            // Folder has no additional fields
+            break;
+            
+        case CRSF_PARAM_TYPE_INFO:
+            obj["value"] = param.infoValue;
+            break;
+            
+        case CRSF_PARAM_TYPE_COMMAND:
+            obj["status"] = param.cmdStatus;
+            obj["timeout"] = param.cmdTimeout;
+            if (strlen(param.cmdInfo) > 0) {
+                obj["info"] = param.cmdInfo;
+            }
+            break;
+    }
+}
 
 static void HandleCRSFScan(AsyncWebServerRequest *request)
 {
-  // MOCK: Simulating CRSF device discovery
-  // In real implementation:
-  // 1. Send DEVICE_PING (0x28) broadcast over Serial to TX module
-  // 2. Wait 2 seconds for DEVICE_INFO (0x29) responses
-  // 3. Parse responses and build device list
-
-  JsonDocument json;
-  JsonArray devices = json.to<JsonArray>();
-
-  // MOCK Device 1: RM Ranger
-  JsonObject device1 = devices.add<JsonObject>();
-  device1["name"] = "RM Ranger";
-  device1["address"] = 0xEE;
-  device1["serialNumber"] = 1162629715;
-  device1["hardwareId"] = 0;
-  device1["firmwareId"] = 262144;
-  device1["parametersTotal"] = 33;
-  device1["parameterVersion"] = 0;
-  device1["online"] = true;
-
-  // MOCK Device 2: RM XR4 (selected in screenshot)
-  JsonObject device2 = devices.add<JsonObject>();
-  device2["name"] = "RM XR4";
-  device2["address"] = 0xEC;
-  device2["serialNumber"] = 1162629715;
-  device2["hardwareId"] = 0;
-  device2["firmwareId"] = 262144;
-  device2["parametersTotal"] = 13;
-  device2["parameterVersion"] = 0;
-  device2["online"] = true;
-
-  AsyncResponseStream *response = request->beginResponseStream("application/json");
-  serializeJson(json, *response);
-  request->send(response);
+    // Clear previous results
+    discoveredDevices.clear();
+    pendingCRSFRequest = request;
+    
+    DBGLN("=== CRSF SCAN REQUEST from HTTP API ===");
+    
+    // Start scan - this will send DEVICE_PING and collect responses
+    crsfParams.startScan(
+        // onDevice callback - called for each discovered device
+        [](const CRSFDeviceInfo& device) {
+            DBGLN("  Device discovered: %s (addr=0x%02X, params=%d)", device.name, device.address, device.parametersTotal);
+            discoveredDevices.push_back(device);
+        },
+        // onComplete callback - called when scan finishes (timeout)
+        [](bool success) {
+            DBGLN("=== CRSF SCAN COMPLETE: success=%d, devices=%d ===", success, discoveredDevices.size());
+            
+            if (pendingCRSFRequest) {
+                JsonDocument json;
+                JsonArray devices = json.to<JsonArray>();
+                
+                for (const auto& device : discoveredDevices) {
+                    JsonObject d = devices.add<JsonObject>();
+                    d["name"] = device.name;
+                    d["address"] = device.address;
+                    d["serialNumber"] = device.serialNumber;
+                    d["hardwareId"] = device.hardwareId;
+                    d["firmwareId"] = device.firmwareId;
+                    d["parametersTotal"] = device.parametersTotal;
+                    d["parameterVersion"] = device.parameterVersion;
+                    d["online"] = device.online;
+                }
+                
+                AsyncResponseStream *response = pendingCRSFRequest->beginResponseStream("application/json");
+                serializeJson(json, *response);
+                pendingCRSFRequest->send(response);
+                pendingCRSFRequest = nullptr;
+            }
+        }
+    );
 }
 
 static void HandleCRSFParams(AsyncWebServerRequest *request)
 {
-  // MOCK: Simulating parameter loading
-  // In real implementation:
-  // 1. Send PARAM_READ (0x2C) for each parameter number
-  // 2. Receive PARAM_ENTRY (0x2B) chunks
-  // 3. Parse parameter data based on type
+    if (!request->hasParam("device")) {
+        request->send(400, "text/plain", "Missing device parameter");
+        return;
+    }
+    
+    int deviceAddress = request->getParam("device")->value().toInt();
+    
+    // Find the device in our discovered list to get param count
+    uint8_t paramCount = 0;
+    for (const auto& device : discoveredDevices) {
+        if (device.address == deviceAddress) {
+            paramCount = device.parametersTotal;
+            break;
+        }
+    }
+    
+    if (paramCount == 0) {
+        // Device not found in discovered list, return empty array
+        JsonDocument json;
+        json.to<JsonArray>();
+        AsyncResponseStream *response = request->beginResponseStream("application/json");
+        serializeJson(json, *response);
+        request->send(response);
+        return;
+    }
+    
+    // Clear previous parameters and set up state
+    loadedParameters.clear();
+    pendingCRSFRequest = request;
+    pendingDeviceAddress = deviceAddress;
+    pendingParamCount = paramCount;
+    
+    DBGLN("=== CRSF PARAMS REQUEST: device=0x%02X, count=%d ===", deviceAddress, paramCount);
+    
+    // Start loading parameters
+    crsfParams.loadParameters(
+        deviceAddress,
+        paramCount,
+        // onParam callback - called for each parameter loaded
+        [](const CRSFParamInfo& param) {
+            DBGLN("  Param loaded: #%d \"%s\" type=%d", param.paramNumber, param.name, param.type);
+            loadedParameters.push_back(param);
+        },
+        // onComplete callback - called when all params loaded or error
+        [](bool success) {
+            DBGLN("=== CRSF PARAMS COMPLETE: success=%d, loaded=%d ===", success, loadedParameters.size());
+            
+            if (pendingCRSFRequest) {
+                if (success) {
+                    JsonDocument json;
+                    JsonArray params = json.to<JsonArray>();
+                    
+                    for (const auto& param : loadedParameters) {
+                        JsonObject p = params.add<JsonObject>();
+                        paramToJson(p, param);
+                    }
+                    
+                    AsyncResponseStream *response = pendingCRSFRequest->beginResponseStream("application/json");
+                    serializeJson(json, *response);
+                    pendingCRSFRequest->send(response);
+                } else {
+                    DBGLN("  Error: %s", crsfParams.getLastError());
+                    pendingCRSFRequest->send(500, "text/plain", crsfParams.getLastError());
+                }
+                pendingCRSFRequest = nullptr;
+            }
+        }
+    );
+}
 
-  if (!request->hasParam("device")) {
-    request->send(400, "text/plain", "Missing device parameter");
-    return;
-  }
-
-  int deviceAddress = request->getParam("device")->value().toInt();
-
-  // MOCK: Only return params for RM XR4 (0xEC = 236)
-  if (deviceAddress != 0xEC && deviceAddress != 236) {
-    JsonDocument json;
-    JsonArray params = json.to<JsonArray>();
-    AsyncResponseStream *response = request->beginResponseStream("application/json");
-    serializeJson(json, *response);
-    request->send(response);
-    return;
-  }
-
-  // MOCK: RM XR4 Parameters (matching screenshot)
-  JsonDocument json;
-  JsonArray params = json.to<JsonArray>();
-
-  // Parameter 1: Protocol (TEXT_SELECTION)
-  JsonObject p1 = params.add<JsonObject>();
-  p1["paramNumber"] = 1;
-  p1["parentFolder"] = 0;
-  p1["type"] = 0x09; // TEXT_SELECTION
-  p1["isHidden"] = false;
-  p1["name"] = "Protocol";
-  JsonArray p1opts = p1["options"].to<JsonArray>();
-  p1opts.add("CRSF");
-  p1opts.add("Inversion");
-  p1opts.add("Off");
-  p1["value"] = 0; // CRSF
-  p1["min"] = 0;
-  p1["max"] = 2;
-  p1["default"] = 0;
-  p1["unit"] = "";
-
-  // Parameter 2: Protocol2 (TEXT_SELECTION)
-  JsonObject p2 = params.add<JsonObject>();
-  p2["paramNumber"] = 2;
-  p2["parentFolder"] = 0;
-  p2["type"] = 0x09; // TEXT_SELECTION
-  p2["isHidden"] = false;
-  p2["name"] = "Protocol2";
-  JsonArray p2opts = p2["options"].to<JsonArray>();
-  p2opts.add("Off");
-  p2opts.add("CRSF");
-  p2opts.add("Inversion");
-  p2["value"] = 0; // Off
-  p2["min"] = 0;
-  p2["max"] = 2;
-  p2["default"] = 0;
-  p2["unit"] = "";
-
-  // Parameter 3: SBUS failsafe (TEXT_SELECTION)
-  JsonObject p3 = params.add<JsonObject>();
-  p3["paramNumber"] = 3;
-  p3["parentFolder"] = 0;
-  p3["type"] = 0x09; // TEXT_SELECTION
-  p3["isHidden"] = false;
-  p3["name"] = "SBUS failsafe";
-  JsonArray p3opts = p3["options"].to<JsonArray>();
-  p3opts.add("No Pulses");
-  p3opts.add("Last Position");
-  p3["value"] = 0; // No Pulses
-  p3["min"] = 0;
-  p3["max"] = 1;
-  p3["default"] = 0;
-  p3["unit"] = "";
-
-  // Parameter 4: Tlm Power (UINT8)
-  JsonObject p4 = params.add<JsonObject>();
-  p4["paramNumber"] = 4;
-  p4["parentFolder"] = 0;
-  p4["type"] = 0x00; // UINT8
-  p4["isHidden"] = false;
-  p4["name"] = "Tlm Power";
-  p4["value"] = 100;
-  p4["min"] = 0;
-  p4["max"] = 250;
-  p4["default"] = 100;
-  p4["unit"] = "mW";
-
-  // Parameter 5: Team Race (COMMAND)
-  JsonObject p5 = params.add<JsonObject>();
-  p5["paramNumber"] = 5;
-  p5["parentFolder"] = 0;
-  p5["type"] = 0x0D; // COMMAND
-  p5["isHidden"] = false;
-  p5["name"] = "Team Race";
-  p5["status"] = 0;
-  p5["timeout"] = 0;
-
-  // Parameter 6: Bind Storage (TEXT_SELECTION)
-  JsonObject p6 = params.add<JsonObject>();
-  p6["paramNumber"] = 6;
-  p6["parentFolder"] = 0;
-  p6["type"] = 0x09; // TEXT_SELECTION
-  p6["isHidden"] = false;
-  p6["name"] = "Bind Storage";
-  JsonArray p6opts = p6["options"].to<JsonArray>();
-  p6opts.add("Persistent");
-  p6opts.add("Volatile");
-  p6["value"] = 0; // Persistent
-  p6["min"] = 0;
-  p6["max"] = 1;
-  p6["default"] = 0;
-  p6["unit"] = "";
-
-  // Parameter 7: Enter Bind Mode (COMMAND)
-  JsonObject p7 = params.add<JsonObject>();
-  p7["paramNumber"] = 7;
-  p7["parentFolder"] = 0;
-  p7["type"] = 0x0D; // COMMAND
-  p7["isHidden"] = false;
-  p7["name"] = "Enter Bind Mode";
-  p7["status"] = 0;
-  p7["timeout"] = 0;
-
-  // Parameter 8: Model Id (TEXT_SELECTION)
-  JsonObject p8 = params.add<JsonObject>();
-  p8["paramNumber"] = 8;
-  p8["parentFolder"] = 0;
-  p8["type"] = 0x09; // TEXT_SELECTION
-  p8["isHidden"] = false;
-  p8["name"] = "Model Id";
-  JsonArray p8opts = p8["options"].to<JsonArray>();
-  p8opts.add("Off");
-  p8opts.add("1");
-  p8opts.add("2");
-  p8opts.add("3");
-  p8["value"] = 0; // Off
-  p8["min"] = 0;
-  p8["max"] = 3;
-  p8["default"] = 0;
-  p8["unit"] = "";
-
-  // Parameter 9: tx-usb-crsf (INFO)
-  JsonObject p9 = params.add<JsonObject>();
-  p9["paramNumber"] = 9;
-  p9["parentFolder"] = 0;
-  p9["type"] = 0x0C; // INFO
-  p9["isHidden"] = false;
-  p9["name"] = "tx-usb-crsf";
-  p9["value"] = "79edc1";
-
-  AsyncResponseStream *response = request->beginResponseStream("application/json");
-  serializeJson(json, *response);
-  request->send(response);
+// Helper function to serialize parameter value based on type
+static void serializeParamValue(JsonVariant value, uint8_t paramType, uint8_t* buffer, uint8_t& bufferLen) {
+    bufferLen = 0;
+    
+    switch (paramType) {
+        case CRSF_PARAM_TYPE_UINT8:
+        case CRSF_PARAM_TYPE_INT8:
+        case CRSF_PARAM_TYPE_TEXT_SELECTION:
+            buffer[0] = value.as<int>() & 0xFF;
+            bufferLen = 1;
+            break;
+            
+        case CRSF_PARAM_TYPE_UINT16:
+        case CRSF_PARAM_TYPE_INT16:
+            {
+                int16_t val = value.as<int>();
+                buffer[0] = (val >> 8) & 0xFF;
+                buffer[1] = val & 0xFF;
+                bufferLen = 2;
+            }
+            break;
+            
+        case CRSF_PARAM_TYPE_UINT32:
+        case CRSF_PARAM_TYPE_INT32:
+            {
+                int32_t val = value.as<int>();
+                buffer[0] = (val >> 24) & 0xFF;
+                buffer[1] = (val >> 16) & 0xFF;
+                buffer[2] = (val >> 8) & 0xFF;
+                buffer[3] = val & 0xFF;
+                bufferLen = 4;
+            }
+            break;
+            
+        case CRSF_PARAM_TYPE_STRING:
+            {
+                const char* str = value.as<const char*>();
+                if (str) {
+                    size_t len = strlen(str);
+                    if (len > 60) len = 60;  // Max payload size
+                    memcpy(buffer, str, len);
+                    buffer[len] = 0;  // Null terminator
+                    bufferLen = len + 1;
+                }
+            }
+            break;
+            
+        case CRSF_PARAM_TYPE_COMMAND:
+            // Commands send status byte (usually 1 to trigger)
+            buffer[0] = 1;
+            bufferLen = 1;
+            break;
+            
+        default:
+            break;
+    }
 }
 
 static void HandleCRSFParamWrite(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
 {
-  // MOCK: Simulating parameter write
-  // In real implementation:
-  // 1. Parse JSON request body
-  // 2. Serialize parameter value based on type
-  // 3. Send PARAM_WRITE (0x2D) frame over Serial
-  // 4. Wait for acknowledgment
-
-  // Parse JSON body
-  JsonDocument json;
-  DeserializationError error = deserializeJson(json, data, len);
-
-  if (error) {
-    request->send(400, "text/plain", "Invalid JSON");
-    return;
-  }
-
-  int deviceAddress = json["device"];
-  int paramNumber = json["paramNumber"];
-  // JsonVariant value = json["value"]; // Would use this in real implementation
-
-  DBGLN("MOCK: Write param %d on device 0x%02X", paramNumber, deviceAddress);
-
-  // TODO: Real implementation would:
-  // 1. Get parameter type from stored parameters
-  // 2. Serialize value based on type (uint8, float, string, etc.)
-  // 3. Build CRSF PARAM_WRITE frame
-  // 4. Send via Serial to TX module
-  // 5. Wait for acknowledgment
-
-  request->send(200, "text/plain", "OK");
+    // Parse JSON body
+    JsonDocument json;
+    DeserializationError error = deserializeJson(json, data, len);
+    
+    if (error) {
+        request->send(400, "text/plain", "Invalid JSON");
+        return;
+    }
+    
+    int deviceAddress = json["device"];
+    int paramNumber = json["paramNumber"];
+    JsonVariant value = json["value"];
+    
+    // Find the parameter type in our loaded parameters
+    uint8_t paramType = CRSF_PARAM_TYPE_UINT8;  // Default
+    for (const auto& param : loadedParameters) {
+        if (param.paramNumber == paramNumber) {
+            paramType = param.type;
+            break;
+        }
+    }
+    
+    // Serialize the value
+    uint8_t valueBuffer[64];
+    uint8_t valueLen = 0;
+    serializeParamValue(value, paramType, valueBuffer, valueLen);
+    
+    DBGLN("=== CRSF PARAM WRITE: device=0x%02X param=%d type=0x%02X valueLen=%d ===", 
+          deviceAddress, paramNumber, paramType, valueLen);
+    DBG("  Value bytes: ");
+    for (uint8_t i = 0; i < valueLen; i++) {
+        DBG("0x%02X ", valueBuffer[i]);
+    }
+    DBGLN("");
+    
+    // Send the write command
+    crsfParams.writeParameter(
+        deviceAddress,
+        paramNumber,
+        valueBuffer,
+        valueLen,
+        [](bool success) {
+            // Note: The request has already been responded to synchronously below
+            // This callback is just for logging
+            DBGLN("=== CRSF PARAM WRITE COMPLETE: success=%d ===", success);
+        }
+    );
+    
+    // Respond immediately - writes are fire-and-forget for now
+    // A more robust implementation would wait for ACK
+    request->send(200, "text/plain", "OK");
 }
 
 static void HandleCRSFParamExecute(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
 {
-  // MOCK: Simulating command execution
-  // In real implementation:
-  // 1. Parse JSON request body
-  // 2. Send PARAM_WRITE (0x2D) for command parameter
-  // 3. Wait for acknowledgment
-
-  JsonDocument json;
-  DeserializationError error = deserializeJson(json, data, len);
-
-  if (error) {
-    request->send(400, "text/plain", "Invalid JSON");
-    return;
-  }
-
-  int deviceAddress = json["device"];
-  int paramNumber = json["paramNumber"];
-
-  DBGLN("MOCK: Execute command param %d on device 0x%02X", paramNumber, deviceAddress);
-
-  // TODO: Real implementation would send PARAM_WRITE frame for command
-
-  request->send(200, "text/plain", "OK");
+    // Parse JSON body
+    JsonDocument json;
+    DeserializationError error = deserializeJson(json, data, len);
+    
+    if (error) {
+        request->send(400, "text/plain", "Invalid JSON");
+        return;
+    }
+    
+    int deviceAddress = json["device"];
+    int paramNumber = json["paramNumber"];
+    
+    DBGLN("Executing command param %d on device 0x%02X", paramNumber, deviceAddress);
+    
+    // Commands are executed by writing value 1
+    uint8_t cmdValue = 1;
+    
+    crsfParams.writeParameter(
+        deviceAddress,
+        paramNumber,
+        &cmdValue,
+        1,
+        [](bool success) {
+            DBGLN("CRSF command execute %s", success ? "complete" : "failed");
+        }
+    );
+    
+    // Respond immediately
+    request->send(200, "text/plain", "OK");
 }
 
-// END CRSF Parameters MOCK
+// END CRSF Parameters Implementation
 //=========================================================
 
 static void WebUpdateSendNetworks(AsyncWebServerRequest *request)

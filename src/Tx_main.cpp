@@ -26,6 +26,9 @@
 #include <MAVLink.h>
 #endif
 
+// CRSF Parameters support
+#include "CrsfParams.h"
+
 /////////// GLOBALS ///////////
 
 uint8_t bindingAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -367,6 +370,9 @@ void setup()
   Serial.setRxBufferSize(4096);
   Serial.begin(460800);
 
+  // Initialize CRSF parameters handler with Serial port
+  crsfParams.begin(&Serial);
+
   options_init();
 
   eeprom.Begin();
@@ -440,6 +446,9 @@ void loop()
 
   devicesUpdate(now);
 
+  // Process CRSF params state machine (handles timeouts only, bytes fed below)
+  crsfParams.loop();
+
   #if defined(PLATFORM_ESP8266) || defined(PLATFORM_ESP32)
     // If the reboot time is set and the current time is past the reboot time then reboot.
     if (rebootTime != 0 && now > rebootTime) {
@@ -447,14 +456,19 @@ void loop()
     }
   #endif
 
+  // Process all bytes from Serial through all parsers (MSP, MAVLink, CRSF)
   if (Serial.available())
   {
     uint8_t c = Serial.read();
+
+    // Try to parse CRSF parameters frames
+    crsfParams.processReceivedByte(c);
 
     // Try to parse MSP packets from the TX
     if (msp.processReceivedByte(c))
     {
       // Finished processing a complete packet
+      DBGLN("MSP packet received from TX: function=0x%04X", msp.getReceivedPacket()->function);
       ProcessMSPPacketFromTX(msp.getReceivedPacket());
       msp.markPacketReceived();
     }
