@@ -64,21 +64,47 @@ extern unsigned long rebootTime;
 
 #if defined(AAT_BACKPACK)
 static const char *myHostname = "elrs_aat";
-static const char *wifi_ap_ssid = "ExpressLRS AAT Backpack";
+static char wifi_ap_ssid[33]; // will be set by user config or default
 #elif defined(TARGET_VRX_BACKPACK)
 static const char *myHostname = "elrs_vrx";
-static const char *wifi_ap_ssid = "ExpressLRS VRx Backpack";
+static char wifi_ap_ssid[33]; // will be set by user config or default
 #elif defined(TARGET_TX_BACKPACK)
 static const char *myHostname = "elrs_txbp";
-static char wifi_ap_ssid[33]; // will be set depending on wifiService
+static char wifi_ap_ssid[33]; // will be set by user config or default
 
 #elif defined(TARGET_TIMER_BACKPACK)
 static const char *myHostname = "elrs_timer";
-static const char *wifi_ap_ssid = "ExpressLRS Timer Backpack";
+static char wifi_ap_ssid[33]; // will be set by user config or default
 #else
 #error Unknown target
 #endif
 static const char *wifi_ap_password = "expresslrs";
+
+// Helper function to get the default AP SSID based on backpack type and service
+static void getDefaultApSsid(char* buffer, size_t bufferSize)
+{
+#if defined(AAT_BACKPACK)
+  strncpy(buffer, "ExpressLRS AAT Backpack", bufferSize - 1);
+#elif defined(TARGET_VRX_BACKPACK)
+  strncpy(buffer, "ExpressLRS VRx Backpack", bufferSize - 1);
+#elif defined(TARGET_TX_BACKPACK)
+  if (wifiService == WIFI_SERVICE_UPDATE)
+  {
+    strncpy(buffer, "ExpressLRS TX Backpack", bufferSize - 1);
+  }
+  else if (wifiService == WIFI_SERVICE_MAVLINK_TX)
+  {
+    snprintf(buffer, bufferSize, "ExpressLRS TX Backpack %02X%02X%02X",
+      firmwareOptions.uid[3],
+      firmwareOptions.uid[4],
+      firmwareOptions.uid[5]
+    );
+  }
+#elif defined(TARGET_TIMER_BACKPACK)
+  strncpy(buffer, "ExpressLRS Timer Backpack", bufferSize - 1);
+#endif
+  buffer[bufferSize - 1] = '\0';
+}
 
 static char station_ssid[33];
 static char station_password[65];
@@ -262,6 +288,16 @@ static void GetConfiguration(AsyncWebServerRequest *request)
   json["config"]["mode"] = wifiMode == WIFI_STA ? "STA" : "AP";
   json["config"]["product_name"] = firmwareOptions.product_name;
 
+  // Send the custom AP SSID if configured, otherwise send the default SSID
+  const char* customApSsid = config.GetWiFiApSSID();
+  if (customApSsid[0] != 0) {
+    json["config"]["ap_ssid"] = customApSsid;
+  } else {
+    char defaultSsid[33];
+    getDefaultApSsid(defaultSsid, sizeof(defaultSsid));
+    json["config"]["ap_ssid"] = defaultSsid;
+  }
+
 #if defined(HAS_HEADTRACKING) || defined(SUPPORT_HEADTRACKING)
   json["config"]["head-tracking"] = true;
 #endif
@@ -281,7 +317,8 @@ static void GetConfiguration(AsyncWebServerRequest *request)
 // State for async CRSF operations
 static AsyncWebServerRequest* pendingCRSFRequest = nullptr;
 static std::vector<CRSFDeviceInfo> discoveredDevices;
-static std::vector<CRSFParamInfo> loadedParameters;
+static AsyncResponseStream* pendingParamResponse = nullptr;
+static bool pendingParamFirst = true;
 static uint8_t pendingDeviceAddress = 0;
 static uint8_t pendingParamCount = 0;
 
@@ -434,14 +471,35 @@ static void HandleCRSFParams(AsyncWebServerRequest *request)
         return;
     }
     
-    // Clear previous parameters and set up state
-    loadedParameters.clear();
+    // Clean up any pending request by sending an error response
+    if (pendingCRSFRequest) {
+        DBGLN("=== CRSF: Cancelling previous request ===");
+        if (pendingParamResponse) {
+            // Close incomplete JSON and send
+            pendingParamResponse->print("]");
+            pendingCRSFRequest->send(pendingParamResponse);
+        } else {
+            pendingCRSFRequest->send(500, "text/plain", "Request cancelled");
+        }
+        pendingCRSFRequest = nullptr;
+        pendingParamResponse = nullptr;
+
+        // Cancel the ongoing CRSF operation
+        crsfParams.cancelParameterLoad();
+    }
+
+    // Set up state and start streaming response
     pendingCRSFRequest = request;
     pendingDeviceAddress = deviceAddress;
     pendingParamCount = paramCount;
-    
+
+    // Start the JSON array in the response stream
+    pendingParamResponse = request->beginResponseStream("application/json");
+    pendingParamResponse->print("[");
+    pendingParamFirst = true;
+
     DBGLN("=== CRSF PARAMS REQUEST: device=0x%02X, count=%d ===", deviceAddress, paramCount);
-    
+
     // Start loading parameters
     crsfParams.loadParameters(
         deviceAddress,
@@ -449,30 +507,39 @@ static void HandleCRSFParams(AsyncWebServerRequest *request)
         // onParam callback - called for each parameter loaded
         [](const CRSFParamInfo& param) {
             DBGLN("  Param loaded: #%d \"%s\" type=%d", param.paramNumber, param.name, param.type);
-            loadedParameters.push_back(param);
+
+            // Stream each parameter directly to response
+            if (pendingParamResponse) {
+                if (!pendingParamFirst) {
+                    pendingParamResponse->print(",");
+                }
+                pendingParamFirst = false;
+
+                // Serialize parameter to JSON and write to stream
+                JsonDocument doc;
+                JsonObject p = doc.to<JsonObject>();
+                paramToJson(p, param);
+                serializeJson(doc, *pendingParamResponse);
+            }
         },
         // onComplete callback - called when all params loaded or error
         [](bool success) {
-            DBGLN("=== CRSF PARAMS COMPLETE: success=%d, loaded=%d ===", success, loadedParameters.size());
-            
+            DBGLN("=== CRSF PARAMS COMPLETE: success=%d ===", success);
+
             if (pendingCRSFRequest) {
-                if (success) {
-                    JsonDocument json;
-                    JsonArray params = json.to<JsonArray>();
-                    
-                    for (const auto& param : loadedParameters) {
-                        JsonObject p = params.add<JsonObject>();
-                        paramToJson(p, param);
-                    }
-                    
-                    AsyncResponseStream *response = pendingCRSFRequest->beginResponseStream("application/json");
-                    serializeJson(json, *response);
-                    pendingCRSFRequest->send(response);
+                if (success && pendingParamResponse) {
+                    // Close the JSON array and send
+                    pendingParamResponse->print("]");
+                    pendingCRSFRequest->send(pendingParamResponse);
                 } else {
                     DBGLN("  Error: %s", crsfParams.getLastError());
+                    if (pendingParamResponse) {
+                        delete pendingParamResponse;
+                    }
                     pendingCRSFRequest->send(500, "text/plain", crsfParams.getLastError());
                 }
                 pendingCRSFRequest = nullptr;
+                pendingParamResponse = nullptr;
             }
         }
     );
@@ -550,15 +617,10 @@ static void HandleCRSFParamWrite(AsyncWebServerRequest *request, uint8_t *data, 
     int deviceAddress = json["device"];
     int paramNumber = json["paramNumber"];
     JsonVariant value = json["value"];
-    
-    // Find the parameter type in our loaded parameters
-    uint8_t paramType = CRSF_PARAM_TYPE_UINT8;  // Default
-    for (const auto& param : loadedParameters) {
-        if (param.paramNumber == paramNumber) {
-            paramType = param.type;
-            break;
-        }
-    }
+
+    // Get parameter type from the request (client must provide it)
+    // This is necessary since we no longer cache all parameters in memory
+    uint8_t paramType = json["paramType"] | CRSF_PARAM_TYPE_UINT8;  // Default to UINT8 if not provided
     
     // Serialize the value
     uint8_t valueBuffer[64];
@@ -694,6 +756,32 @@ static void WebUpdateSetHome(AsyncWebServerRequest *request)
     config.Commit();
   }
   WebUpdateConnect(request);
+}
+
+static void WebUpdateSetApSSID(AsyncWebServerRequest *request)
+{
+  String ap_ssid = request->arg("ap_ssid");
+
+  // Check for reset to default marker
+  if (ap_ssid == "___DEFAULT___") {
+    DBGLN("Resetting AP SSID to default");
+    config.SetWiFiApSSID("");  // Empty string = use default
+    config.Commit();
+    sendResponse(request, "WiFi AP SSID reset to default. Changes will take effect on next AP mode activation.");
+    return;
+  }
+
+  // Validate SSID length
+  if (ap_ssid.length() == 0 || ap_ssid.length() > 32) {
+    sendResponse(request, "Error: SSID must be between 1 and 32 characters");
+    return;
+  }
+
+  DBGLN("Setting AP SSID to '%s'", ap_ssid.c_str());
+  config.SetWiFiApSSID(ap_ssid.c_str());
+  config.Commit();
+
+  sendResponse(request, "WiFi AP SSID updated successfully. Changes will take effect on next AP mode activation.");
 }
 
 static void WebUpdateForget(AsyncWebServerRequest *request)
@@ -1045,6 +1133,7 @@ static void startServices()
   server.on("/config", HTTP_GET, GetConfiguration);
   server.on("/networks.json", WebUpdateSendNetworks);
   server.on("/sethome", WebUpdateSetHome);
+  server.on("/setapssid", WebUpdateSetApSSID);
   #if defined(MAVLINK_ENABLED)
   server.on("/setmavlink", WebUpdateSetMavLink);
   #endif
@@ -1132,6 +1221,7 @@ static void HandleWebUpdate()
   if (changeMode != wifiMode && changeMode != WIFI_OFF && (now - changeTime) > 500) {
     switch(changeMode) {
       case WIFI_AP:
+      {
         DBGLN("Changing to AP mode");
         WiFi.disconnect();
         wifiMode = WIFI_AP;
@@ -1142,21 +1232,15 @@ static void HandleWebUpdate()
         #endif
         changeTime = now;
         WiFi.softAPConfig(apIP, apIP, netMsk);
-#if defined(TARGET_TX_BACKPACK)
-        if (wifiService == WIFI_SERVICE_UPDATE)
-        {
-          strcpy(wifi_ap_ssid, "ExpressLRS TX Backpack");
+        // Set AP SSID: use custom SSID if configured, otherwise use defaults
+        const char* customSsid = config.GetWiFiApSSID();
+        if (customSsid[0] != 0) {
+          // User has configured a custom SSID - use it as-is
+          strcpy(wifi_ap_ssid, customSsid);
+        } else {
+          // Fall back to default SSID based on backpack type
+          getDefaultApSsid(wifi_ap_ssid, sizeof(wifi_ap_ssid));
         }
-        else if (wifiService == WIFI_SERVICE_MAVLINK_TX)
-        {
-          // Generate a unique SSID using config.address as hex
-          sprintf(wifi_ap_ssid, "ExpressLRS TX Backpack %02X%02X%02X",
-            firmwareOptions.uid[3],
-            firmwareOptions.uid[4],
-            firmwareOptions.uid[5]
-          );
-        }
-#endif
         WiFi.softAP(wifi_ap_ssid, wifi_ap_password);
         WiFi.scanNetworks(true);
         startServices();
@@ -1164,6 +1248,7 @@ static void HandleWebUpdate()
         esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
         #endif
         break;
+      }
       case WIFI_STA:
         DBGLN("Connecting to home network '%s' '%s'", station_ssid, station_password);
         wifiMode = WIFI_STA;

@@ -18,12 +18,14 @@ CRSFParams::CRSFParams() :
     _targetParamCount(0),
     _currentParam(0),
     _currentChunk(0),
+    _paramChunksLen(0),
     _onParamInfo(nullptr),
     _onParamComplete(nullptr),
     _onWriteComplete(nullptr)
 {
     memset(_lastError, 0, sizeof(_lastError));
     memset(_rxBuffer, 0, sizeof(_rxBuffer));
+    memset(_paramChunks, 0, sizeof(_paramChunks));
 }
 
 void CRSFParams::begin(Stream* serial) {
@@ -164,7 +166,7 @@ bool CRSFParams::assembleFrame(uint8_t byte) {
         if (calculatedCRC == receivedCRC) {
             return true;
         } else {
-            DBGLN("CRSF CRC mismatch: calc=0x%02X recv=0x%02X", calculatedCRC, receivedCRC);
+            DBGLN("CRSF CRC FAIL: calc=0x%02X recv=0x%02X type=0x%02X", calculatedCRC, receivedCRC, _rxBuffer[2]);
         }
         
         // Reset for next frame
@@ -177,11 +179,13 @@ bool CRSFParams::assembleFrame(uint8_t byte) {
 void CRSFParams::processFrame() {
     uint8_t type = _rxBuffer[2];
     uint8_t frameLen = _rxBuffer[1];
-    
-    DBGLN("CRSF RX: type=0x%02X frameLen=%d", type, frameLen);
+    uint8_t dest = _rxBuffer[3];
+    uint8_t origin = _rxBuffer[4];
+
+    DBGLN("CRSF RX: type=0x%02X len=%d dest=0x%02X origin=0x%02X state=%d", type, frameLen, dest, origin, _state);
     DBG("  Frame: ");
-    for (uint8_t i = 0; i < frameLen + 2; i++) {
-        DBG("0x%02X ", _rxBuffer[i]);
+    for (uint8_t i = 0; i < frameLen + 2 && i < 32; i++) {
+        DBG("%02X ", _rxBuffer[i]);
     }
     DBGLN("");
     
@@ -233,8 +237,21 @@ void CRSFParams::cancelScan() {
     }
 }
 
+void CRSFParams::cancelParameterLoad() {
+    if (_state == CRSF_STATE_READING_PARAMS) {
+        _state = CRSF_STATE_IDLE;
+        _onParamInfo = nullptr;
+        _onParamComplete = nullptr;
+        _paramChunksLen = 0;
+        DBGLN("CRSF: Parameter load cancelled");
+    }
+}
+
 void CRSFParams::handleDeviceInfo() {
-    if (_state != CRSF_STATE_SCANNING) return;
+    if (_state != CRSF_STATE_SCANNING) {
+        DBGLN("CRSF: Ignoring DEVICE_INFO (wrong state: %d)", _state);
+        return;
+    }
     
     // Parse DEVICE_INFO frame
     // Frame structure: [SYNC] [LEN] [TYPE] [DEST] [ORIGIN] [NAME\0] [SERIAL(4)] [HW_ID(4)] [FW_ID(4)] [PARAM_COUNT] [PARAM_VERSION] [CRC]
@@ -282,7 +299,14 @@ void CRSFParams::handleDeviceInfo() {
 
 void CRSFParams::loadParameters(uint8_t deviceAddress, uint8_t paramCount,
                                ParamInfoCallback onParam, CompletionCallback onComplete) {
+    // Cancel any ongoing parameter load
+    if (_state == CRSF_STATE_READING_PARAMS) {
+        DBGLN("CRSF: Cancelling previous parameter load");
+        cancelParameterLoad();
+    }
+
     if (_state != CRSF_STATE_IDLE) {
+        DBGLN("CRSF: Cannot start param load, state=%d", _state);
         if (onComplete) onComplete(false);
         return;
     }
@@ -294,7 +318,7 @@ void CRSFParams::loadParameters(uint8_t deviceAddress, uint8_t paramCount,
     _targetParamCount = paramCount;
     _currentParam = 1; // Parameters are 1-indexed
     _currentChunk = 0;
-    _paramChunks.clear();
+    _paramChunksLen = 0;
     _onParamInfo = onParam;
     _onParamComplete = onComplete;
     
@@ -305,8 +329,11 @@ void CRSFParams::loadParameters(uint8_t deviceAddress, uint8_t paramCount,
 }
 
 void CRSFParams::handleParamEntry() {
-    if (_state != CRSF_STATE_READING_PARAMS) return;
-    
+    if (_state != CRSF_STATE_READING_PARAMS) {
+        DBGLN("CRSF: Ignoring PARAM_ENTRY (wrong state: %d, need %d)", _state, CRSF_STATE_READING_PARAMS);
+        return;
+    }
+
     DBGLN("CRSF: Handling PARAM_ENTRY");
     
     // Parse PARAM_ENTRY frame
@@ -316,7 +343,10 @@ void CRSFParams::handleParamEntry() {
     uint8_t origin = _rxBuffer[4];
     
     // Verify this is from our target device
-    if (origin != _targetDevice) return;
+    if (origin != _targetDevice) {
+        DBGLN("CRSF: Wrong origin 0x%02X (expected 0x%02X)", origin, _targetDevice);
+        return;
+    }
     
     uint8_t* payload = &_rxBuffer[5];
     uint8_t payloadLen = frameLen - 4;
@@ -335,11 +365,22 @@ void CRSFParams::handleParamEntry() {
         DBGLN("CRSF: Unexpected param number %d (expected %d)", paramNumber, _currentParam);
         return;
     }
-    
-    // Append chunk data
-    for (uint8_t i = 0; i < chunkDataLen; i++) {
-        _paramChunks.push_back(chunkData[i]);
+
+    // Sanity check: if this is the first chunk, reset the buffer
+    if (_currentChunk == 0) {
+        _paramChunksLen = 0;
     }
+
+    // Check if we have enough space in the buffer
+    if (_paramChunksLen + chunkDataLen > sizeof(_paramChunks)) {
+        DBGLN("CRSF: Param buffer overflow! current=%d + new=%d > max=%d", _paramChunksLen, chunkDataLen, sizeof(_paramChunks));
+        completeRequest(false, "Parameter too large");
+        return;
+    }
+
+    // Append chunk data
+    memcpy(&_paramChunks[_paramChunksLen], chunkData, chunkDataLen);
+    _paramChunksLen += chunkDataLen;
     
     _currentChunk++;
     _lastActivityTime = millis();
@@ -352,16 +393,16 @@ void CRSFParams::handleParamEntry() {
         CRSFParamInfo param;
         memset(&param, 0, sizeof(param));
         param.paramNumber = paramNumber;
-        
-        parseParamInfo(param, _paramChunks.data(), _paramChunks.size());
-        
+
+        parseParamInfo(param, _paramChunks, _paramChunksLen);
+
         // Notify callback
         if (_onParamInfo) {
             _onParamInfo(param);
         }
-        
+
         // Move to next parameter or complete
-        _paramChunks.clear();
+        _paramChunksLen = 0;
         _currentChunk = 0;
         _currentParam++;
         

@@ -48,8 +48,8 @@ enum CRSFParamType {
 
 // Timeouts (in ms)
 #define CRSF_SCAN_TIMEOUT_MS         2000
-#define CRSF_PARAM_READ_TIMEOUT_MS   500
-#define CRSF_PARAM_WRITE_TIMEOUT_MS  500
+#define CRSF_PARAM_READ_TIMEOUT_MS   2000
+#define CRSF_PARAM_WRITE_TIMEOUT_MS  1000
 
 // Device info structure
 struct CRSFDeviceInfo {
@@ -137,9 +137,12 @@ public:
     
     // Cancel ongoing scan
     void cancelScan();
-    
+
+    // Cancel ongoing parameter load
+    void cancelParameterLoad();
+
     // Start loading all parameters for a device
-    void loadParameters(uint8_t deviceAddress, uint8_t paramCount, 
+    void loadParameters(uint8_t deviceAddress, uint8_t paramCount,
                        ParamInfoCallback onParam, CompletionCallback onComplete);
     
     // Write a parameter value
@@ -171,7 +174,8 @@ private:
     uint8_t _targetParamCount;
     uint8_t _currentParam;
     uint8_t _currentChunk;
-    std::vector<uint8_t> _paramChunks;
+    uint8_t _paramChunks[256];  // Fixed-size buffer instead of vector
+    uint16_t _paramChunksLen;
     ParamInfoCallback _onParamInfo;
     CompletionCallback _onParamComplete;
     

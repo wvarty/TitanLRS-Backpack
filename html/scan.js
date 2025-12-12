@@ -7,7 +7,7 @@ function _(el) {
 function init() {
     initAat();
     initMavLink();
-    initCRSFParams(); // Initialize CRSF parameters tab
+    initCRSFParams();
 
     // sends XMLHttpRequest, so do it last
     initOptions();
@@ -142,6 +142,11 @@ function updateConfig(data) {
         _('tx_tab').style.display = 'none';
     }
     if(config['product_name'] && _('product_name')) _('product_name').textContent = config['product_name'];
+
+    // Update AP SSID field with current value
+    if (config['ap_ssid']) {
+        _('ap_ssid').value = config['ap_ssid'];
+    }
 
     updateAatConfig(config);
 }
@@ -507,6 +512,46 @@ function aatLineElementChanged()
 _('sethome').addEventListener('submit', callback("Set Home Network", "An error occurred setting the home network", "/sethome", function() {
     return new FormData(_('sethome'));
 }));
+_('setapssid').addEventListener('submit', callback("WiFi AP SSID Updated", "An error occurred updating the AP SSID", "/setapssid", function() {
+    return new FormData(_('setapssid'));
+}));
+_('ap_ssid_reset').addEventListener('click', function() {
+    // Reset to default by clearing the custom SSID
+    const xmlhttp = new XMLHttpRequest();
+    xmlhttp.onreadystatechange = function() {
+        if (this.readyState == 4) {
+            if (this.status == 200) {
+                cuteAlert({
+                    type: "info",
+                    title: "Reset to Default",
+                    message: "AP SSID has been reset to default. Changes will take effect on next AP mode activation."
+                });
+                // Fetch updated config and refresh the SSID field
+                const configHttp = new XMLHttpRequest();
+                configHttp.onreadystatechange = function() {
+                    if (this.readyState == 4 && this.status == 200) {
+                        const data = JSON.parse(this.responseText);
+                        if (data.config && data.config.ap_ssid) {
+                            _('ap_ssid').value = data.config.ap_ssid;
+                        }
+                    }
+                };
+                configHttp.open('GET', '/config', true);
+                configHttp.send();
+            } else {
+                cuteAlert({
+                    type: "error",
+                    title: "Reset to Default",
+                    message: "An error occurred resetting the AP SSID"
+                });
+            }
+        }
+    };
+    xmlhttp.open('POST', '/setapssid', true);
+    const formData = new FormData();
+    formData.append('ap_ssid', '___DEFAULT___');
+    xmlhttp.send(formData);
+});
 _('connect').addEventListener('click', callback("Connect to Home Network", "An error occurred connecting to the Home network", "/connect", null));
 _('access').addEventListener('click', callback("Access Point", "An error occurred starting the Access Point", "/access", null));
 _('forget').addEventListener('click', callback("Forget Home Network", "An error occurred forgetting the home network", "/forget", null));
@@ -1177,6 +1222,7 @@ function updateParameter(paramNumber, value) {
     xhr.send(JSON.stringify({
         device: selectedDevice.address,
         paramNumber: paramNumber,
+        paramType: param.type,
         value: value
     }));
 }
@@ -1217,7 +1263,8 @@ function executeCommand(paramNumber) {
             xhr.setRequestHeader('Content-Type', 'application/json');
             xhr.send(JSON.stringify({
                 device: selectedDevice.address,
-                paramNumber: paramNumber
+                paramNumber: paramNumber,
+                paramType: param.type
             }));
         }
     });

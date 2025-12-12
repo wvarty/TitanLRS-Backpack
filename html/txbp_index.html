@@ -68,6 +68,25 @@
 			</div>
 
 			<div class="mui-tabs__pane" id="pane-justified-3">
+				<div class="mui-panel">
+					<h2>Access Point Configuration</h2>
+					Configure the SSID for the WiFi Access Point.
+					<form action="/setapssid" id="setapssid" method="POST" autocomplete="off" class="mui-form">
+						<div class="mui-textfield" style="width: 80%;">
+							<input type="text" id="ap_ssid" name="ap_ssid" placeholder="Access Point SSID" maxlength="32" required/>
+						</div>
+						<table>
+							<tr>
+								<td>
+									<input type="submit" value="Save SSID" class="mui-btn mui-btn--primary">
+								</td>
+								<td>
+									<button type="button" id="ap_ssid_reset" class="mui-btn mui-btn--primary">Reset to Default</button>
+								</td>
+							</tr>
+						</table>
+					</form>
+				</div>
 				<div id="apmode" style="display:none;">
 					<div class="mui-panel">
 						<h2>Join Network</h2>
