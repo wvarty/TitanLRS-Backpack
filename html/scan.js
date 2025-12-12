@@ -1002,11 +1002,17 @@ function loadAllParameters() {
             isLoadingParameters = false;
 
             if (this.status == 200) {
-                const params = JSON.parse(this.responseText);
-                crsfParameters = params;
-                renderCurrentFolder();
+                try {
+                    const params = JSON.parse(this.responseText);
+                    crsfParameters = params;
+                    renderCurrentFolder();
+                } catch (e) {
+                    console.error('Failed to parse parameters JSON:', e);
+                    console.error('Response text:', this.responseText);
+                    _('params_content').innerHTML = '<p style="color: #f44336;">Error: Invalid JSON response from server. Check console for details.</p>';
+                }
             } else {
-                _('params_content').innerHTML = '<p style="color: #f44336;">Error loading parameters</p>';
+                _('params_content').innerHTML = '<p style="color: #f44336;">Error loading parameters (HTTP ' + this.status + ')</p>';
             }
         }
     };

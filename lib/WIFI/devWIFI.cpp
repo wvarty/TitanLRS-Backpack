@@ -321,6 +321,7 @@ static AsyncResponseStream* pendingParamResponse = nullptr;
 static bool pendingParamFirst = true;
 static uint8_t pendingDeviceAddress = 0;
 static uint8_t pendingParamCount = 0;
+static uint8_t pendingParamsWritten = 0;
 
 // Serialize a parameter to JSON
 static void paramToJson(JsonObject& obj, const CRSFParamInfo& param) {
@@ -494,9 +495,12 @@ static void HandleCRSFParams(AsyncWebServerRequest *request)
     pendingParamCount = paramCount;
 
     // Start the JSON array in the response stream
-    pendingParamResponse = request->beginResponseStream("application/json");
+    // Use a large buffer (8KB) to handle full parameters set
+    // and add delays between sends to ensure WiFi can keep up
+    pendingParamResponse = request->beginResponseStream("application/json", 8192);
     pendingParamResponse->print("[");
     pendingParamFirst = true;
+    pendingParamsWritten = 0;
 
     DBGLN("=== CRSF PARAMS REQUEST: device=0x%02X, count=%d ===", deviceAddress, paramCount);
 
@@ -520,6 +524,15 @@ static void HandleCRSFParams(AsyncWebServerRequest *request)
                 JsonObject p = doc.to<JsonObject>();
                 paramToJson(p, param);
                 serializeJson(doc, *pendingParamResponse);
+
+                // Increment counter and pause frequently to let network send
+                pendingParamsWritten++;
+                // Yield to allow WiFi to transmit buffered data
+                yield();
+                
+                // Add delay after every parameter to prevent buffer overflow
+                // This is critical for parameters with large option strings
+                delay(50);
             }
         },
         // onComplete callback - called when all params loaded or error
@@ -528,8 +541,13 @@ static void HandleCRSFParams(AsyncWebServerRequest *request)
 
             if (pendingCRSFRequest) {
                 if (success && pendingParamResponse) {
-                    // Close the JSON array and send
+                    // Close the JSON array
                     pendingParamResponse->print("]");
+                    
+                    // Give the buffer time to be flushed before sending
+                    delay(10);
+                    
+                    // Send the response
                     pendingCRSFRequest->send(pendingParamResponse);
                 } else {
                     DBGLN("  Error: %s", crsfParams.getLastError());
