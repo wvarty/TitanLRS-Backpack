@@ -176,6 +176,7 @@ private:
     uint8_t _currentChunk;
     uint8_t _paramChunks[256];  // Fixed-size buffer instead of vector
     uint16_t _paramChunksLen;
+    uint8_t _lastChunkLen;      // Size of last chunk appended (for duplicate detection)
     ParamInfoCallback _onParamInfo;
     CompletionCallback _onParamComplete;
     

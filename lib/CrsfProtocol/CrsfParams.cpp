@@ -19,6 +19,7 @@ CRSFParams::CRSFParams() :
     _currentParam(0),
     _currentChunk(0),
     _paramChunksLen(0),
+    _lastChunkLen(0),
     _onParamInfo(nullptr),
     _onParamComplete(nullptr),
     _onWriteComplete(nullptr)
@@ -274,6 +275,7 @@ void CRSFParams::cancelParameterLoad() {
         _onParamInfo = nullptr;
         _onParamComplete = nullptr;
         _paramChunksLen = 0;
+        _lastChunkLen = 0;
         DBGLN("CRSF: Parameter load cancelled");
     }
 }
@@ -313,11 +315,24 @@ void CRSFParams::handleDeviceInfo() {
         device.parameterVersion = payload[offset++];
         
         DBGLN("CRSF Device: %s addr=0x%x params=%d", device.name, device.address, device.parametersTotal);
-        
-        // Add to discovered list and notify callback
-        _discoveredDevices.push_back(device);
-        if (_onDeviceInfo) {
-            _onDeviceInfo(device);
+
+        // Check if this device already exists in the list (de-duplicate)
+        // Some receivers send DEVICE_INFO frames multiple times
+        bool alreadyExists = false;
+        for (const auto& existing : _discoveredDevices) {
+            if (existing.address == device.address) {
+                DBGLN("CRSF: Device 0x%x already discovered, ignoring duplicate", device.address);
+                alreadyExists = true;
+                break;
+            }
+        }
+
+        // Add to discovered list and notify callback only if new
+        if (!alreadyExists) {
+            _discoveredDevices.push_back(device);
+            if (_onDeviceInfo) {
+                _onDeviceInfo(device);
+            }
         }
     }
     
@@ -350,6 +365,7 @@ void CRSFParams::loadParameters(uint8_t deviceAddress, uint8_t paramCount,
     _currentParam = 1; // Parameters are 1-indexed
     _currentChunk = 0;
     _paramChunksLen = 0;
+    _lastChunkLen = 0;
     _onParamInfo = onParam;
     _onParamComplete = onComplete;
     
@@ -388,18 +404,38 @@ void CRSFParams::handleParamEntry() {
     uint8_t chunksRemaining = payload[1];
     uint8_t* chunkData = &payload[2];
     uint8_t chunkDataLen = payloadLen - 2;
-    
+
     DBGLN("  ParamNum=%d Chunk=%d/%d DataLen=%d", paramNumber, _currentChunk, _currentChunk + chunksRemaining, chunkDataLen);
-    
+
     // Verify parameter number matches what we requested
     if (paramNumber != _currentParam) {
         DBGLN("CRSF: Unexpected param number %d (expected %d)", paramNumber, _currentParam);
         return;
     }
 
+    // Sanity check: reject obviously invalid chunks_remaining values
+    // Values > 100 are likely corrupted frames from other protocols (MAVLink, etc)
+    if (chunksRemaining > 100) {
+        DBGLN("CRSF: Invalid chunks_remaining=%d, ignoring frame", chunksRemaining);
+        return;
+    }
+
     // Sanity check: if this is the first chunk, reset the buffer
     if (_currentChunk == 0) {
         _paramChunksLen = 0;
+        _lastChunkLen = 0;
+    } else {
+        // Not the first chunk - check for duplicate
+        // Some buggy receivers send each chunk twice
+        if (_lastChunkLen == chunkDataLen && _paramChunksLen >= chunkDataLen) {
+            // Check if this chunk data matches the last chunk we appended
+            if (memcmp(&_paramChunks[_paramChunksLen - chunkDataLen], chunkData, chunkDataLen) == 0) {
+                DBGLN("CRSF: Duplicate chunk detected, ignoring");
+                // Don't increment _currentChunk, just request the next chunk
+                sendParamRead(_targetDevice, _currentParam, _currentChunk);
+                return;
+            }
+        }
     }
 
     // Check if we have enough space in the buffer
@@ -412,6 +448,7 @@ void CRSFParams::handleParamEntry() {
     // Append chunk data
     memcpy(&_paramChunks[_paramChunksLen], chunkData, chunkDataLen);
     _paramChunksLen += chunkDataLen;
+    _lastChunkLen = chunkDataLen;
     
     _currentChunk++;
     _lastActivityTime = millis();
@@ -434,6 +471,7 @@ void CRSFParams::handleParamEntry() {
 
         // Move to next parameter or complete
         _paramChunksLen = 0;
+        _lastChunkLen = 0;
         _currentChunk = 0;
         _currentParam++;
         
