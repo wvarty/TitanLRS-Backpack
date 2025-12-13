@@ -2,6 +2,8 @@
 #include "crsf_protocol.h"
 #include "logging.h"
 #include <math.h>
+#include "msp.h"
+#include "msptypes.h"
 
 // Global instance
 CRSFParams crsfParams;
@@ -72,6 +74,7 @@ void CRSFParams::sendFrame(uint8_t type, uint8_t destination, uint8_t origin,
                           const uint8_t* payload, uint8_t payloadLen) {
     if (!_serial) return;
     
+    // Build the complete CRSF frame
     // Frame structure: [SYNC] [LEN] [TYPE] [DEST] [ORIGIN] [PAYLOAD...] [CRC]
     // LEN = type + dest + origin + payload + crc = 4 + payloadLen
     uint8_t frameLen = 4 + payloadLen;
@@ -93,14 +96,23 @@ void CRSFParams::sendFrame(uint8_t type, uint8_t destination, uint8_t origin,
     uint8_t crc = calculateCRC(&frame[2], frameLen - 1);
     frame[idx++] = crc;
     
-    DBGLN("CRSF TX: type=0x%x dest=0x%x origin=0x%x payloadLen=%d", type, destination, origin, payloadLen);
-    DBG("  Frame: ");
-    for (uint8_t i = 0; i < idx; i++) {
-        DBG("0x%x ", frame[i]);
+    // Embed the CRSF frame in an MSP packet
+    // CRSF frames are up to 64 bytes, MSP payload buffer is 300 bytes, so we're safe
+    if (idx > CRSF_MAX_FRAME_SIZE) {
+        DBGLN("CRSF frame exceeds max CRSF frame size");
+        return;
     }
-    DBGLN("");
     
-    _serial->write(frame, idx);
+    mspPacket_t packet;
+    packet.reset();
+    packet.makeCommand();
+    packet.function = MSP_ELRS_BACKPACK_CRSF_FRAME;
+    
+    for (uint8_t i = 0; i < idx; ++i) {
+        packet.addByte(frame[i]);
+    }
+    
+    MSP::sendPacket(&packet, _serial);
     _lastActivityTime = millis();
 }
 
@@ -130,131 +142,62 @@ void CRSFParams::sendParamWrite(uint8_t deviceAddress, uint8_t paramNumber,
 // Frame Receiving
 //=========================================================
 
-bool CRSFParams::assembleFrame(uint8_t byte) {
-    // State machine to assemble CRSF frames
-    if (_rxIndex == 0) {
-        // Looking for sync byte
-        if (byte == CRSF_SYNC_BYTE) {
-            _rxBuffer[_rxIndex++] = byte;
-        }
-        return false;
-    }
-
-    if (_rxIndex == 1) {
-        // Frame length byte
-        if (byte > 0 && byte <= CRSF_MAX_FRAME_SIZE - 2) {
-            _rxBuffer[_rxIndex++] = byte;
-            // Debug: Log when we start receiving a large frame
-            if (byte > 50 && _state == CRSF_STATE_READING_PARAMS) {
-                DBGLN("CRSF: Starting large frame, len=%d", byte);
-            }
-        } else {
-            // Invalid length, reset
-            DBGLN("CRSF: Invalid length byte=%d, resetting", byte);
-            _rxIndex = 0;
-            // If this byte is a sync byte, restart with it
-            if (byte == CRSF_SYNC_BYTE) {
-                _rxBuffer[_rxIndex++] = byte;
-            }
-        }
-        return false;
-    }
-
-    // Accumulate frame bytes
-    _rxBuffer[_rxIndex++] = byte;
-
-    // Safety check: prevent buffer overflow
-    // Allow _rxIndex to reach CRSF_MAX_FRAME_SIZE for maximum-size frames
-    if (_rxIndex > CRSF_MAX_FRAME_SIZE) {
-        _rxIndex = 0;
-        return false;
-    }
-
-    // Check if we have complete frame
-    // Total frame size = sync(1) + len(1) + payload(len)
-    uint8_t expectedLen = _rxBuffer[1] + 2;
-
-    if (_rxIndex >= expectedLen) {
-        // Verify CRC
-        uint8_t frameLen = _rxBuffer[1];
-        uint8_t calculatedCRC = calculateCRC(&_rxBuffer[2], frameLen - 1);
-        uint8_t receivedCRC = _rxBuffer[_rxIndex - 1];
-
-        if (calculatedCRC == receivedCRC) {
-            return true;
-        } else {
-            DBGLN("CRSF CRC FAIL: calc=0x%x recv=0x%x type=0x%x", calculatedCRC, receivedCRC, _rxBuffer[2]);
-        }
-
-        // Reset for next frame, but look for sync byte in the failed frame data
-        // This helps resynchronize faster when we're getting non-CRSF data
-        _rxIndex = 0;
-
-        // Search through the failed frame for the next potential sync byte
-        // to avoid discarding valid frames that might follow immediately
-        for (uint8_t i = 1; i < expectedLen && i < CRSF_MAX_FRAME_SIZE; i++) {
-            if (_rxBuffer[i] == CRSF_SYNC_BYTE) {
-                // Found a potential sync byte, copy remaining data to start of buffer
-                uint8_t remaining = expectedLen - i;
-                if (remaining > 0 && remaining < CRSF_MAX_FRAME_SIZE) {
-                    memmove(_rxBuffer, &_rxBuffer[i], remaining);
-                    _rxIndex = remaining;
-                }
-                break;
-            }
-        }
-    }
-
-    return false;
-}
-
 void CRSFParams::processCompleteFrame(const uint8_t* frameData, uint8_t frameLen) {
     // Process a complete CRSF frame that's already in a buffer
+    // Frame structure per CRSF spec:
+    // [Address byte] [Frame Length] [Type] [Dest*] [Origin*] [Payload...] [CRC]
+    // *Extended frames only
+    //
+    // Frame length constraints (per CRSF spec):
+    // - Valid range: 2-62 bytes (excludes address byte and frame length byte)
+    // - Total frame size: frameLen + 2 (includes address and length bytes)
 
+    // Check total frame size (including address and length bytes)
     if (frameLen < 3 || frameLen > CRSF_MAX_FRAME_SIZE) {
-        DBGLN("CRSF: Invalid frame length %d", frameLen);
+        DBGLN("CRSF: Invalid frame length %d (valid range: 3-64)", frameLen);
         return;
     }
 
-    // Verify this looks like a valid CRSF frame (should start with sync byte)
-    if (frameData[0] != CRSF_SYNC_BYTE) {
-        DBGLN("CRSF: Missing sync byte, got 0x%x", frameData[0]);
+    // Check that frameData is not null
+    if (!frameData) {
+        DBGLN("CRSF: frameData is null");
+        return;
+    }
+
+    // Verify length field matches
+    uint8_t declaredLen = frameData[1];
+    if (declaredLen != (frameLen - 2)) {
+        DBGLN("CRSF: Length mismatch: declared=%d, actual=%d", declaredLen, frameLen - 2);
+        return;
+    }
+
+    // Verify frame type is valid
+    uint8_t frameType = frameData[2];
+    if (frameType > 0x80) {
+        DBGLN("CRSF: Invalid frame type 0x%02X", frameType);
         return;
     }
 
     // Verify CRC
-    uint8_t declaredLen = frameData[1];
-    if (frameLen != declaredLen + 2) {
-        DBGLN("CRSF: Frame length mismatch: actual=%d declared=%d", frameLen, declaredLen + 2);
-        return;
-    }
-
     uint8_t calculatedCRC = calculateCRC(&frameData[2], declaredLen - 1);
     uint8_t receivedCRC = frameData[frameLen - 1];
-
     if (calculatedCRC != receivedCRC) {
-        DBGLN("CRSF CRC FAIL: calc=0x%x recv=0x%x type=0x%x", calculatedCRC, receivedCRC, frameData[2]);
+        DBGLN("CRSF CRC FAIL: calc=0x%x recv=0x%x type=0x%x", calculatedCRC, receivedCRC, frameType);
         return;
     }
 
-    // Copy to internal buffer and process
+    // Frame is valid - copy to internal buffer and process
     memcpy(_rxBuffer, frameData, frameLen);
     _rxIndex = frameLen;
     processFrame();
 }
 
-void CRSFParams::processFrame() {
+void CRSFParams::processFrame()
+{
     uint8_t type = _rxBuffer[2];
     uint8_t frameLen = _rxBuffer[1];
     uint8_t dest = _rxBuffer[3];
     uint8_t origin = _rxBuffer[4];
-
-    DBGLN("CRSF RX: type=0x%x len=%d dest=0x%x origin=0x%x state=%d", type, frameLen, dest, origin, _state);
-    DBG("  Frame: ");
-    for (uint8_t i = 0; i < frameLen + 2 && i < 32; i++) {
-        DBG("%x ", _rxBuffer[i]);
-    }
-    DBGLN("");
     
     switch (type) {
         case CRSF_FRAMETYPE_DEVICE_INFO:
@@ -349,8 +292,6 @@ void CRSFParams::handleDeviceInfo() {
         device.parametersTotal = payload[offset++];
         device.parameterVersion = payload[offset++];
         
-        DBGLN("CRSF Device: %s addr=0x%x params=%d", device.name, device.address, device.parametersTotal);
-
         // Check if this device already exists in the list (de-duplicate)
         // Some receivers send DEVICE_INFO frames multiple times
         bool alreadyExists = false;
@@ -403,9 +344,7 @@ void CRSFParams::loadParameters(uint8_t deviceAddress, uint8_t paramCount,
     _lastChunkLen = 0;
     _onParamInfo = onParam;
     _onParamComplete = onComplete;
-    
-    DBGLN("CRSF: Loading %d params from device 0x%x", paramCount, deviceAddress);
-    
+        
     // Request first parameter, first chunk
     sendParamRead(_targetDevice, _currentParam, _currentChunk);
 }
@@ -415,8 +354,6 @@ void CRSFParams::handleParamEntry() {
         DBGLN("CRSF: Ignoring PARAM_ENTRY (wrong state: %d, need %d)", _state, CRSF_STATE_READING_PARAMS);
         return;
     }
-
-    DBGLN("CRSF: Handling PARAM_ENTRY");
     
     // Parse PARAM_ENTRY frame
     // Frame structure: [SYNC] [LEN] [TYPE] [DEST] [ORIGIN] [PARAM_NUM] [CHUNKS_REMAINING] [CHUNK_DATA...] [CRC]
@@ -439,8 +376,6 @@ void CRSFParams::handleParamEntry() {
     uint8_t chunksRemaining = payload[1];
     uint8_t* chunkData = &payload[2];
     uint8_t chunkDataLen = payloadLen - 2;
-
-    DBGLN("  ParamNum=%d Chunk=%d/%d DataLen=%d", paramNumber, _currentChunk, _currentChunk + chunksRemaining, chunkDataLen);
 
     // Verify parameter number matches what we requested
     if (paramNumber != _currentParam) {
@@ -466,8 +401,8 @@ void CRSFParams::handleParamEntry() {
             // Check if this chunk data matches the last chunk we appended
             if (memcmp(&_paramChunks[_paramChunksLen - chunkDataLen], chunkData, chunkDataLen) == 0) {
                 DBGLN("CRSF: Duplicate chunk detected, ignoring");
-                // Don't increment _currentChunk, just request the next chunk
-                sendParamRead(_targetDevice, _currentParam, _currentChunk);
+                // Silently ignore duplicates - update activity timer but don't process or re-request
+                _lastActivityTime = millis();
                 return;
             }
         }
@@ -489,7 +424,7 @@ void CRSFParams::handleParamEntry() {
     _lastActivityTime = millis();
     
     if (chunksRemaining > 0) {
-        // Request next chunk
+        // Request next chunk - use _currentChunk which was just incremented
         sendParamRead(_targetDevice, _currentParam, _currentChunk);
     } else {
         // Parameter complete, parse it
@@ -538,9 +473,7 @@ void CRSFParams::writeParameter(uint8_t deviceAddress, uint8_t paramNumber,
     _targetDevice = deviceAddress;
     _currentParam = paramNumber;
     _onWriteComplete = onComplete;
-    
-    DBGLN("CRSF: Writing param %d on device 0x%x", paramNumber, deviceAddress);
-    
+        
     sendParamWrite(deviceAddress, paramNumber, value, valueLen);
     
     // For now, assume write is successful after sending
@@ -693,9 +626,6 @@ void CRSFParams::parseParamInfo(CRSFParamInfo& param, const uint8_t* data, uint1
             }
             break;
     }
-    
-    DBGLN("CRSF Param: #%d '%s' type=0x%x parent=%d",
-          param.paramNumber, param.name, param.type, param.parentFolder);
 }
 
 //=========================================================
@@ -738,7 +668,6 @@ void CRSFParams::checkTimeout() {
         case CRSF_STATE_SCANNING:
             // Scan completes after timeout (we wait for all responses)
             if (elapsed >= CRSF_SCAN_TIMEOUT_MS) {
-                DBGLN("CRSF: Scan complete, found %d devices", _discoveredDevices.size());
                 completeRequest(true);
             }
             break;

@@ -39,6 +39,7 @@ connectionState_e connectionState = starting;
 // Assume we are in wifi update mode until we know otherwise
 wifi_service_t wifiService = WIFI_SERVICE_UPDATE;
 unsigned long rebootTime = 0;
+unsigned long lastStackPressureLog = 0;
 
 bool cacheFull = false;
 bool sendCached = false;
@@ -457,6 +458,17 @@ void setup()
 void loop()
 {
   uint32_t now = millis();
+
+  // Log stack pressure every 5 seconds
+  if (now - lastStackPressureLog >= 5000)
+  {
+    lastStackPressureLog = now;
+    #if defined(PLATFORM_ESP32)
+      DBGLN("Stack pressure - Free PSRAM: %u bytes, Free Heap: %u bytes", ESP.getFreePsram(), ESP.getFreeHeap());
+    #else
+      DBGLN("Stack pressure - Free Heap: %u bytes", ESP.getFreeHeap());
+    #endif
+  }
 
   devicesUpdate(now);
 

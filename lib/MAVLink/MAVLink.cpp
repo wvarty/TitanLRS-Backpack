@@ -2,6 +2,9 @@
 #include <Arduino.h>
 #include "MAVLink.h"
 #include <config.h>
+#include "logging.h"
+#include "msp.h"
+#include "msptypes.h"
 
 void
 MAVLink::ProcessMAVLinkFromTX(uint8_t c)
@@ -62,12 +65,38 @@ MAVLink::ProcessMAVLinkFromGCS(uint8_t *data, uint16_t len)
     {
         if (mavlink_frame_char(MAVLINK_COMM_1, data[i], &msg, &status) != MAVLINK_FRAMING_INCOMPLETE)
         {
-            // Send the message to the tx uart
+            // Convert the message to a buffer
             uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-            uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-            Serial.write(buf, len);
+            uint16_t bufLen = mavlink_msg_to_send_buffer(buf, &msg);
+            
+            // Send the message to the TX via MSP-embedded MAVLink frame
+            sendMAVLinkFrameToSerial(buf, bufLen);
             mavlink_stats.packets_uplink++;
         }
     }
+}
+
+void
+MAVLink::sendMAVLinkFrameToSerial(const uint8_t *data, uint16_t size)
+{
+    // MAVLink frames can be up to 280 bytes (255 payload + 25 overhead)
+    // Ensure it fits in the MSP payload
+    if (size > 280)
+    {
+        DBGLN("MAVLink frame exceeds max length: %d", size);
+        return;
+    }
+
+    mspPacket_t packet;
+    packet.reset();
+    packet.makeCommand();
+    packet.function = MSP_ELRS_BACKPACK_MAVLINK_FRAME;
+
+    for (uint16_t i = 0; i < size; ++i)
+    {
+        packet.addByte(data[i]);
+    }
+
+    MSP::sendPacket(&packet, &Serial);
 }
 #endif

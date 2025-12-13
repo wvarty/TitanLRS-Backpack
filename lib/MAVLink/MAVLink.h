@@ -38,5 +38,8 @@ private:
     uint8_t             mavlink_to_gcs_buf_count; // Count of the number of messages in the buffer
     uint8_t             expectedSeq;
     bool                expectedSeqSet;
+    
+    // Helper function to embed MAVLink frames in MSP packets
+    void sendMAVLinkFrameToSerial(const uint8_t *data, uint16_t size);
 };
 #endif
