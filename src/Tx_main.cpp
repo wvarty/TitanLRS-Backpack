@@ -363,12 +363,12 @@ RF_PRE_INIT()
 
 void setup()
 {
+  Serial.setRxBufferSize(4096);
 #ifdef DEBUG_LOG
   LOGGING_UART.begin(115200);
   LOGGING_UART.setDebugOutput(true);
 #endif
-  Serial.setRxBufferSize(4096);
-  Serial.begin(460800);
+  Serial.begin(1870000);
 
   // Initialize CRSF parameters handler with Serial port
   crsfParams.begin(&Serial);
@@ -456,27 +456,40 @@ void loop()
     }
   #endif
 
-  // Process all bytes from Serial through all parsers (MSP, MAVLink, CRSF)
-  if (Serial.available())
+  // Process bytes from Serial through all parsers (MSP, MAVLink, CRSF)
+  // Use block reads to avoid tying up the main loop for extended periods
+  size_t available = Serial.available();
+  if (available > 0)
   {
-    uint8_t c = Serial.read();
+    // Limit block size to prevent main loop starvation
+    const size_t maxBlockSize = 256;
+    size_t blockSize = (available > maxBlockSize) ? maxBlockSize : available;
+    uint8_t buf[blockSize];
 
-    // Try to parse CRSF parameters frames
-    crsfParams.processReceivedByte(c);
+    size_t bytesRead = Serial.readBytes(buf, blockSize);
 
-    // Try to parse MSP packets from the TX
-    if (msp.processReceivedByte(c))
+    // Feed each byte through all protocol parsers
+    for (size_t i = 0; i < bytesRead; i++)
     {
-      // Finished processing a complete packet
-      DBGLN("MSP packet received from TX: function=0x%04X", msp.getReceivedPacket()->function);
-      ProcessMSPPacketFromTX(msp.getReceivedPacket());
-      msp.markPacketReceived();
-    }
+      uint8_t c = buf[i];
 
-  #if defined(MAVLINK_ENABLED)
-    // Try to parse MAVLink packets from the TX
-    mavlink.ProcessMAVLinkFromTX(c);
-  #endif
+      // Try to parse CRSF parameters frames
+      crsfParams.processReceivedByte(c);
+
+      // Try to parse MSP packets from the TX
+      if (msp.processReceivedByte(c))
+      {
+        // Finished processing a complete packet
+        DBGLN("MSP packet received from TX: function=0x%04X", msp.getReceivedPacket()->function);
+        ProcessMSPPacketFromTX(msp.getReceivedPacket());
+        msp.markPacketReceived();
+      }
+
+    #if defined(MAVLINK_ENABLED)
+      // Try to parse MAVLink packets from the TX
+      mavlink.ProcessMAVLinkFromTX(c);
+    #endif
+    }
   }
 
   if (cacheFull && sendCached)

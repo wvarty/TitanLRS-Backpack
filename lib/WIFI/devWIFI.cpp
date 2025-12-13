@@ -525,14 +525,12 @@ static void HandleCRSFParams(AsyncWebServerRequest *request)
                 paramToJson(p, param);
                 serializeJson(doc, *pendingParamResponse);
 
-                // Increment counter and pause frequently to let network send
+                // Increment counter
                 pendingParamsWritten++;
-                // Yield to allow WiFi to transmit buffered data
+
+                // Yield to allow WiFi stack to process, but don't delay
+                // Delays block serial processing and cause frame timeouts
                 yield();
-                
-                // Add delay after every parameter to prevent buffer overflow
-                // This is critical for parameters with large option strings
-                delay(50);
             }
         },
         // onComplete callback - called when all params loaded or error
@@ -1052,6 +1050,8 @@ static void startWiFi(unsigned long now)
 
   INFOLN("Begin Webupdater");
 
+  // Initialize WiFi driver first (ESP32C3 crashes if persistent/disconnect called on uninitialized WiFi)
+  WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.disconnect();
   WiFi.mode(WIFI_OFF);
