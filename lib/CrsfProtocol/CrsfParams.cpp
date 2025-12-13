@@ -208,6 +208,41 @@ bool CRSFParams::assembleFrame(uint8_t byte) {
     return false;
 }
 
+void CRSFParams::processCompleteFrame(const uint8_t* frameData, uint8_t frameLen) {
+    // Process a complete CRSF frame that's already in a buffer
+
+    if (frameLen < 3 || frameLen > CRSF_MAX_FRAME_SIZE) {
+        DBGLN("CRSF: Invalid frame length %d", frameLen);
+        return;
+    }
+
+    // Verify this looks like a valid CRSF frame (should start with sync byte)
+    if (frameData[0] != CRSF_SYNC_BYTE) {
+        DBGLN("CRSF: Missing sync byte, got 0x%x", frameData[0]);
+        return;
+    }
+
+    // Verify CRC
+    uint8_t declaredLen = frameData[1];
+    if (frameLen != declaredLen + 2) {
+        DBGLN("CRSF: Frame length mismatch: actual=%d declared=%d", frameLen, declaredLen + 2);
+        return;
+    }
+
+    uint8_t calculatedCRC = calculateCRC(&frameData[2], declaredLen - 1);
+    uint8_t receivedCRC = frameData[frameLen - 1];
+
+    if (calculatedCRC != receivedCRC) {
+        DBGLN("CRSF CRC FAIL: calc=0x%x recv=0x%x type=0x%x", calculatedCRC, receivedCRC, frameData[2]);
+        return;
+    }
+
+    // Copy to internal buffer and process
+    memcpy(_rxBuffer, frameData, frameLen);
+    _rxIndex = frameLen;
+    processFrame();
+}
+
 void CRSFParams::processFrame() {
     uint8_t type = _rxBuffer[2];
     uint8_t frameLen = _rxBuffer[1];

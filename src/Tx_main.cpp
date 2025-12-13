@@ -233,6 +233,20 @@ void ProcessMSPPacketFromTX(mspPacket_t *packet)
     }
     break;
 
+  case MSP_ELRS_BACKPACK_CRSF_FRAME:
+    DBGLN("Processing MSP_ELRS_BACKPACK_CRSF_FRAME...");
+    // Un-embed CRSF frame
+    crsfParams.processCompleteFrame(packet->payload, packet->payloadSize);
+    break;
+
+  case MSP_ELRS_BACKPACK_MAVLINK_FRAME:
+    DBGLN("Processing MSP_ELRS_BACKPACK_MAVLINK_FRAME...");
+  #if defined(MAVLINK_ENABLED)
+    // Un-embed MAVLink frame
+    mavlink.ProcessMAVLinkFromTX(packet->payload, packet->payloadSize);
+  #endif
+    break;
+
   case MSP_ELRS_BACKPACK_CONFIG:
     DBGLN("Processing MSP_ELRS_BACKPACK_CONFIG...");
     HandleConfigMsg(packet);
@@ -368,7 +382,7 @@ void setup()
   LOGGING_UART.begin(115200);
   LOGGING_UART.setDebugOutput(true);
 #endif
-  Serial.begin(1870000);
+  Serial.begin(460800);
 
   // Initialize CRSF parameters handler with Serial port
   crsfParams.begin(&Serial);
@@ -456,7 +470,8 @@ void loop()
     }
   #endif
 
-  // Process bytes from Serial through all parsers (MSP, MAVLink, CRSF)
+  // Process bytes from Serial - now only parsing MSP
+  // CRSF and MAVLink frames are embedded inside MSP packets
   // Use block reads to avoid tying up the main loop for extended periods
   size_t available = Serial.available();
   if (available > 0)
@@ -468,15 +483,12 @@ void loop()
 
     size_t bytesRead = Serial.readBytes(buf, blockSize);
 
-    // Feed each byte through all protocol parsers
+    // Feed each byte through MSP parser only
     for (size_t i = 0; i < bytesRead; i++)
     {
       uint8_t c = buf[i];
 
-      // Try to parse CRSF parameters frames
-      crsfParams.processReceivedByte(c);
-
-      // Try to parse MSP packets from the TX
+      // Parse MSP packets from the TX
       if (msp.processReceivedByte(c))
       {
         // Finished processing a complete packet
@@ -484,11 +496,6 @@ void loop()
         ProcessMSPPacketFromTX(msp.getReceivedPacket());
         msp.markPacketReceived();
       }
-
-    #if defined(MAVLINK_ENABLED)
-      // Try to parse MAVLink packets from the TX
-      mavlink.ProcessMAVLinkFromTX(c);
-    #endif
     }
   }
 

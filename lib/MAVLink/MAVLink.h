@@ -21,6 +21,7 @@ class MAVLink
 public:
     MAVLink() : mavlink_to_gcs_buf_count(0), expectedSeq(0), expectedSeqSet(false) {}
     void ProcessMAVLinkFromTX(uint8_t c);
+    void ProcessMAVLinkFromTX(uint8_t *data, uint16_t len);
     void ProcessMAVLinkFromGCS(uint8_t *data, uint16_t len);
 
     // Getters

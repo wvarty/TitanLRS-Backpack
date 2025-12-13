@@ -131,7 +131,10 @@ public:
     
     // Process a single received byte (call this for each byte from Serial)
     void processReceivedByte(uint8_t byte);
-    
+
+    // Process a complete CRSF frame from a buffer
+    void processCompleteFrame(const uint8_t* frameData, uint8_t frameLen);
+
     // Start device scan (broadcasts DEVICE_PING, collects responses)
     void startScan(DeviceInfoCallback onDevice, CompletionCallback onComplete);
     

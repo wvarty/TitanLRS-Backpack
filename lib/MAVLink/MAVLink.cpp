@@ -18,7 +18,7 @@ MAVLink::ProcessMAVLinkFromTX(uint8_t c)
             mavlink_stats.overflows_downlink++;
             mavlink_to_gcs_buf_count = 0;
         }
-        
+
         // Track gaps in the sequence number, add to a dropped counter
         uint8_t seq = msg.seq;
         if (expectedSeqSet && seq != expectedSeq)
@@ -40,6 +40,15 @@ MAVLink::ProcessMAVLinkFromTX(uint8_t c)
         mavlink_to_gcs_buf[mavlink_to_gcs_buf_count] = msg;
         mavlink_to_gcs_buf_count++;
         mavlink_stats.packets_downlink++;
+    }
+}
+
+void
+MAVLink::ProcessMAVLinkFromTX(uint8_t *data, uint16_t len)
+{
+    for (uint16_t i = 0; i < len; i++)
+    {
+        ProcessMAVLinkFromTX(data[i]);
     }
 }
 

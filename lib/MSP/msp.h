@@ -2,11 +2,12 @@
 
 #include <Arduino.h>
 
-// TODO: MSP_PORT_INBUF_SIZE should be changed to
-// dynamically allocate array length based on the payload size
-// Hardcoding payload size to 64 bytes for now, to allow enough space
-// for custom OSD text.
-#define MSP_PORT_INBUF_SIZE 64
+// MSP buffer must be large enough to handle:
+// - Custom OSD text (64 bytes)
+// - CRSF frames (up to 64 bytes)
+// - MAVLink frames (up to 280 bytes: 255 payload + 25 overhead)
+// Set to 300 bytes to accommodate the largest MAVLink frames
+#define MSP_PORT_INBUF_SIZE 300
 
 #define CHECK_PACKET_PARSING() \
   if (packet->readError) {\
