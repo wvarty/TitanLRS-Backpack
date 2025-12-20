@@ -61,21 +61,47 @@ extern unsigned long rebootTime;
 
 #if defined(AAT_BACKPACK)
 static const char *myHostname = "elrs_aat";
-static const char *wifi_ap_ssid = "ExpressLRS AAT Backpack";
+static char wifi_ap_ssid[33]; // will be set by user config or default
 #elif defined(TARGET_VRX_BACKPACK)
 static const char *myHostname = "elrs_vrx";
-static const char *wifi_ap_ssid = "ExpressLRS VRx Backpack";
+static char wifi_ap_ssid[33]; // will be set by user config or default
 #elif defined(TARGET_TX_BACKPACK)
 static const char *myHostname = "elrs_txbp";
-static char wifi_ap_ssid[33]; // will be set depending on wifiService
+static char wifi_ap_ssid[33]; // will be set by user config or default
 
 #elif defined(TARGET_TIMER_BACKPACK)
 static const char *myHostname = "elrs_timer";
-static const char *wifi_ap_ssid = "ExpressLRS Timer Backpack";
+static char wifi_ap_ssid[33]; // will be set by user config or default
 #else
 #error Unknown target
 #endif
 static const char *wifi_ap_password = "expresslrs";
+
+// Helper function to get the default AP SSID based on backpack type and service
+static void getDefaultApSsid(char* buffer, size_t bufferSize)
+{
+#if defined(AAT_BACKPACK)
+  strncpy(buffer, "ExpressLRS AAT Backpack", bufferSize - 1);
+#elif defined(TARGET_VRX_BACKPACK)
+  strncpy(buffer, "ExpressLRS VRx Backpack", bufferSize - 1);
+#elif defined(TARGET_TX_BACKPACK)
+  if (wifiService == WIFI_SERVICE_UPDATE)
+  {
+    strncpy(buffer, "ExpressLRS TX Backpack", bufferSize - 1);
+  }
+  else if (wifiService == WIFI_SERVICE_MAVLINK_TX)
+  {
+    snprintf(buffer, bufferSize, "ExpressLRS TX Backpack %02X%02X%02X",
+      firmwareOptions.uid[3],
+      firmwareOptions.uid[4],
+      firmwareOptions.uid[5]
+    );
+  }
+#elif defined(TARGET_TIMER_BACKPACK)
+  strncpy(buffer, "ExpressLRS Timer Backpack", bufferSize - 1);
+#endif
+  buffer[bufferSize - 1] = '\0';
+}
 
 static char station_ssid[33];
 static char station_password[65];
@@ -259,6 +285,16 @@ static void GetConfiguration(AsyncWebServerRequest *request)
   json["config"]["mode"] = wifiMode == WIFI_STA ? "STA" : "AP";
   json["config"]["product_name"] = firmwareOptions.product_name;
 
+  // Send the custom AP SSID if configured, otherwise send the default SSID
+  const char* customApSsid = config.GetWiFiApSSID();
+  if (customApSsid[0] != 0) {
+    json["config"]["ap_ssid"] = customApSsid;
+  } else {
+    char defaultSsid[33];
+    getDefaultApSsid(defaultSsid, sizeof(defaultSsid));
+    json["config"]["ap_ssid"] = defaultSsid;
+  }
+
 #if defined(HAS_HEADTRACKING) || defined(SUPPORT_HEADTRACKING)
   json["config"]["head-tracking"] = true;
 #endif
@@ -353,7 +389,7 @@ static void WebUpdateForget(AsyncWebServerRequest *request)
     String msg = String("Temporary network forgotten, attempting to connect to network '") + station_ssid + "'";
     sendResponse(request, msg);
     changeWifiMode(WIFI_STA);
-    
+
   }
   else {
     station_ssid[0] = 0;
@@ -362,6 +398,32 @@ static void WebUpdateForget(AsyncWebServerRequest *request)
     sendResponse(request, msg);
     changeWifiMode(WIFI_AP);
   }
+}
+
+static void WebUpdateSetApSSID(AsyncWebServerRequest *request)
+{
+  String ap_ssid = request->arg("ap_ssid");
+
+  // Check for reset to default marker
+  if (ap_ssid == "___DEFAULT___") {
+    DBGLN("Resetting AP SSID to default");
+    config.SetWiFiApSSID("");  // Empty string = use default
+    config.Commit();
+    sendResponse(request, "WiFi AP SSID reset to default. Changes will take effect on next AP mode activation.");
+    return;
+  }
+
+  // Validate SSID length
+  if (ap_ssid.length() == 0 || ap_ssid.length() > 32) {
+    sendResponse(request, "Error: SSID must be between 1 and 32 characters");
+    return;
+  }
+
+  DBGLN("Setting AP SSID to '%s'", ap_ssid.c_str());
+  config.SetWiFiApSSID(ap_ssid.c_str());
+  config.Commit();
+
+  sendResponse(request, "WiFi AP SSID updated successfully. Changes will take effect on next AP mode activation.");
 }
 
 static void WebUpdateHandleNotFound(AsyncWebServerRequest *request)
@@ -689,6 +751,7 @@ static void startServices()
   server.on("/config", HTTP_GET, GetConfiguration);
   server.on("/networks.json", WebUpdateSendNetworks);
   server.on("/sethome", WebUpdateSetHome);
+  server.on("/setapssid", WebUpdateSetApSSID);
   #if defined(MAVLINK_ENABLED)
   server.on("/setmavlink", WebUpdateSetMavLink);
   #endif
@@ -770,6 +833,7 @@ static void HandleWebUpdate()
   if (changeMode != wifiMode && changeMode != WIFI_OFF && (now - changeTime) > 500) {
     switch(changeMode) {
       case WIFI_AP:
+      {
         DBGLN("Changing to AP mode");
         WiFi.disconnect();
         wifiMode = WIFI_AP;
@@ -780,21 +844,14 @@ static void HandleWebUpdate()
         #endif
         changeTime = now;
         WiFi.softAPConfig(apIP, apIP, netMsk);
-#if defined(TARGET_TX_BACKPACK)
-        if (wifiService == WIFI_SERVICE_UPDATE)
-        {
-          strcpy(wifi_ap_ssid, "ExpressLRS TX Backpack");
+        // Use custom SSID if configured, otherwise use default
+        const char* customSsid = config.GetWiFiApSSID();
+        if (customSsid[0] != 0) {
+          strcpy(wifi_ap_ssid, customSsid);
+        } else {
+          // Fall back to default SSID based on backpack type
+          getDefaultApSsid(wifi_ap_ssid, sizeof(wifi_ap_ssid));
         }
-        else if (wifiService == WIFI_SERVICE_MAVLINK_TX)
-        {
-          // Generate a unique SSID using config.address as hex
-          sprintf(wifi_ap_ssid, "ExpressLRS TX Backpack %02X%02X%02X",
-            firmwareOptions.uid[3],
-            firmwareOptions.uid[4],
-            firmwareOptions.uid[5]
-          );
-        }
-#endif
         WiFi.softAP(wifi_ap_ssid, wifi_ap_password);
         WiFi.scanNetworks(true);
         startServices();
@@ -802,6 +859,7 @@ static void HandleWebUpdate()
         esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
         #endif
         break;
+      }
       case WIFI_STA:
         DBGLN("Connecting to home network '%s' '%s'", station_ssid, station_password);
         wifiMode = WIFI_STA;
