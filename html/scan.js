@@ -1082,12 +1082,19 @@ const CrsfParams = {
                 this.updateLoadingProgress();
             }
 
-            // Request next parameter if not done
-            if (this.loadedCount < this.parameterCount) {
-                this.requestNextParameter();
+            // If we have a retry callback (retrying missing params), call it
+            if (this.retryMissingCallback) {
+                const callback = this.retryMissingCallback;
+                this.retryMissingCallback = null;
+                callback();
             } else {
-                // All parameters loaded
-                this.finishLoading();
+                // Normal sequential loading - request next parameter if not done
+                if (this.loadedCount < this.parameterCount) {
+                    this.requestNextParameter();
+                } else {
+                    // All parameters loaded
+                    this.retryMissingParameters();
+                }
             }
         } else {
             // Request next chunk
@@ -1235,6 +1242,9 @@ const CrsfParams = {
         this.loadedCount = 0;
         this.pendingChunks = [];
         this.isLoading = true;
+        this.retryCount = 0;
+        this.maxRetries = 3;
+        this.missingParams = new Set();
 
         _('params_content').style.display = 'none';
         _('params_loading').style.display = 'block';
@@ -1260,22 +1270,97 @@ const CrsfParams = {
         // Set timeout for response
         clearTimeout(this.paramTimeout);
         this.paramTimeout = setTimeout(() => {
-            console.warn('Parameter request timeout for param', paramNum, 'chunk', chunkNum);
-            this.finishLoading();
-        }, 5000);
+            this.handleParameterTimeout(paramNum, chunkNum);
+        }, 3000);  // Reduced to 3 seconds for faster retries
+    },
+
+    // Handle parameter request timeout with retry logic
+    handleParameterTimeout: function(paramNum, chunkNum) {
+        console.warn('Parameter request timeout for param', paramNum, 'chunk', chunkNum, 'retry', this.retryCount);
+
+        if (this.retryCount < this.maxRetries) {
+            // Retry the same parameter
+            this.retryCount++;
+            this.requestParameter(paramNum, chunkNum);
+        } else {
+            // Give up on this parameter after max retries
+            console.error('Failed to load parameter', paramNum, 'after', this.maxRetries, 'retries');
+            this.missingParams.add(paramNum);
+            this.retryCount = 0;
+            this.pendingChunks = [];
+
+            // If we have a retry callback (retrying missing params), call it
+            if (this.retryMissingCallback) {
+                const callback = this.retryMissingCallback;
+                this.retryMissingCallback = null;
+                callback();
+            } else {
+                // Normal sequential loading - try next parameter
+                const nextNum = paramNum + 1;
+                if (nextNum <= this.parameterCount) {
+                    this.requestParameter(nextNum, 0);
+                } else {
+                    // All parameters attempted, try to fill in missing ones
+                    this.retryMissingParameters();
+                }
+            }
+        }
     },
 
     // Request next parameter in sequence
     requestNextParameter: function() {
         if (!this.isLoading) return;
 
+        this.retryCount = 0;  // Reset retry count for new parameter
         const nextNum = this.loadedCount + 1;
         if (nextNum <= this.parameterCount) {
             this.pendingChunks = [];
             this.pendingParamNumber = nextNum;
             this.pendingChunkNumber = 0;
             this.requestParameter(nextNum, 0);
+        } else {
+            // All parameters loaded, check for missing ones
+            this.retryMissingParameters();
         }
+    },
+
+    // Retry loading missing parameters
+    retryMissingParameters: function() {
+        if (this.missingParams.size > 0) {
+            const missing = Array.from(this.missingParams);
+            console.log('Retrying missing parameters:', missing);
+            this.missingParams.clear();  // Clear for this retry pass
+            this.retryMissingParamsArray(missing, 0);
+        } else {
+            // No missing parameters, we're done
+            this.finishLoading();
+        }
+    },
+
+    // Recursively retry an array of missing parameters
+    retryMissingParamsArray: function(missingArray, index) {
+        if (index >= missingArray.length) {
+            // Finished retrying all missing parameters
+            if (this.missingParams.size > 0) {
+                // Still have missing params, give up and finish
+                console.warn('Could not load', this.missingParams.size, 'parameters after retry');
+            }
+            this.finishLoading();
+            return;
+        }
+
+        const paramNum = missingArray[index];
+        this.retryCount = 0;
+        this.pendingChunks = [];
+        this.pendingParamNumber = paramNum;
+        this.pendingChunkNumber = 0;
+
+        // Set a one-time handler for this retry
+        this.retryMissingCallback = () => {
+            this.retryMissingParamsArray(missingArray, index + 1);
+        };
+
+        this.requestParameter(paramNum, 0);
     },
 
     // Update loading progress
@@ -1292,6 +1377,7 @@ const CrsfParams = {
         this.isLoading = false;
         clearTimeout(this.paramTimeout);
         this.paramTimeout = null;
+        this.retryMissingCallback = null;
         _('params_loading').style.display = 'none';
         _('params_content').style.display = 'block';
         this.renderParameters();
