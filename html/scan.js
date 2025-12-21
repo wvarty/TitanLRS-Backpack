@@ -891,9 +891,11 @@ const CRSF = {
         if (type >= 0x28) {
             dest = data[3];
             origin = data[4];
-            payload = data.slice(5, 1 + length);
+            // Payload is from byte 5 to end, excluding CRC (last byte)
+            payload = data.slice(5, length + 1);
         } else {
-            payload = data.slice(3, 1 + length);
+            // Non-extended frame: payload from byte 3, excluding CRC
+            payload = data.slice(3, length + 1);
         }
         return { type, dest, origin, payload };
     },
@@ -922,12 +924,18 @@ const CrsfParams = {
     folderStack: [],
     pendingChunks: [],
     pendingParamNumber: 0,
+    pendingChunkNumber: 0,
+    isLoading: false,
+    initialized: false,
     scanTimeout: null,
     paramTimeout: null,
     originAddress: CRSF.ADDR_RADIO_TRANSMITTER,
 
-    // Initialize the parameters UI
+    // Initialize the parameters UI (only once)
     init: function() {
+        if (this.initialized) return;
+        this.initialized = true;
+
         const scanBtn = _('scan_devices');
         if (scanBtn) {
             scanBtn.addEventListener('click', () => this.scanDevices());
@@ -984,6 +992,12 @@ const CrsfParams = {
 
     // Handle device info response
     handleDeviceInfo: function(frame) {
+        // Only process device info during scanning or if it's from our selected device
+        // Device info responses come after we send a ping, so ignore spurious ones
+        if (!this.scanTimeout && (!this.selectedDevice || frame.origin !== this.selectedDevice.address)) {
+            return;
+        }
+
         const payload = frame.payload;
         // Parse device name (null-terminated string)
         const nameResult = CRSF.readString(payload, 0);
@@ -1020,12 +1034,30 @@ const CrsfParams = {
 
     // Handle parameter entry response
     handleParamEntry: function(frame) {
+        // Ignore if not loading or no device selected
+        if (!this.isLoading || !this.selectedDevice) return;
+
+        // Verify this response is from our selected device
+        if (frame.origin !== this.selectedDevice.address) {
+            return;
+        }
+
         const payload = frame.payload;
         if (payload.length < 2) return;
 
         const paramNumber = payload[0];
         const chunksRemaining = payload[1];
         const chunkData = payload.slice(2);
+
+        // Verify this is the response we're waiting for
+        if (paramNumber !== this.pendingParamNumber) {
+            console.warn('Unexpected param response:', paramNumber, 'expected:', this.pendingParamNumber);
+            return;
+        }
+
+        // Valid response received, clear timeout
+        clearTimeout(this.paramTimeout);
+        this.paramTimeout = null;
 
         // Add chunk to pending
         this.pendingChunks.push(chunkData);
@@ -1059,7 +1091,8 @@ const CrsfParams = {
             }
         } else {
             // Request next chunk
-            this.requestParameter(paramNumber, this.pendingChunks.length);
+            this.pendingChunkNumber = this.pendingChunks.length;
+            this.requestParameter(paramNumber, this.pendingChunkNumber);
         }
     },
 
@@ -1200,17 +1233,24 @@ const CrsfParams = {
         this.parameterCount = this.selectedDevice.parametersTotal;
         this.loadedCount = 0;
         this.pendingChunks = [];
+        this.isLoading = true;
 
         _('params_content').style.display = 'none';
         _('params_loading').style.display = 'block';
 
         // Request first parameter (index 1, chunk 0)
+        this.pendingParamNumber = 1;
+        this.pendingChunkNumber = 0;
         this.requestParameter(1, 0);
     },
 
     // Request a specific parameter chunk
     requestParameter: function(paramNum, chunkNum) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        if (!this.isLoading) return;
+
+        this.pendingParamNumber = paramNum;
+        this.pendingChunkNumber = chunkNum;
 
         const payload = new Uint8Array([paramNum, chunkNum]);
         const frame = CRSF.buildFrame(CRSF.PARAM_READ, this.selectedDevice.address, this.originAddress, payload);
@@ -1219,16 +1259,20 @@ const CrsfParams = {
         // Set timeout for response
         clearTimeout(this.paramTimeout);
         this.paramTimeout = setTimeout(() => {
-            console.warn('Parameter request timeout');
+            console.warn('Parameter request timeout for param', paramNum, 'chunk', chunkNum);
             this.finishLoading();
         }, 5000);
     },
 
     // Request next parameter in sequence
     requestNextParameter: function() {
+        if (!this.isLoading) return;
+
         const nextNum = this.loadedCount + 1;
         if (nextNum <= this.parameterCount) {
             this.pendingChunks = [];
+            this.pendingParamNumber = nextNum;
+            this.pendingChunkNumber = 0;
             this.requestParameter(nextNum, 0);
         }
     },
@@ -1244,7 +1288,9 @@ const CrsfParams = {
 
     // Finish loading and render
     finishLoading: function() {
+        this.isLoading = false;
         clearTimeout(this.paramTimeout);
+        this.paramTimeout = null;
         _('params_loading').style.display = 'none';
         _('params_content').style.display = 'block';
         this.renderParameters();
@@ -1307,8 +1353,8 @@ const CrsfParams = {
         const frame = CRSF.buildFrame(CRSF.PARAM_WRITE, this.selectedDevice.address, this.originAddress, serialized);
         this.ws.send(frame);
 
-        // Reload after a short delay
-        setTimeout(() => this.loadParameters(), 100);
+        // Update local value optimistically (no full reload needed)
+        param.value = value;
     },
 
     // Render device list
