@@ -1216,6 +1216,7 @@ const CrsfParams = {
         _('params_device_name').textContent = device.name;
         _('reload_params').disabled = false;
         _('params_breadcrumb').style.display = 'none';
+        this.renderDeviceList();
         this.loadParameters();
     },
 
@@ -1365,17 +1366,28 @@ const CrsfParams = {
             return;
         }
 
-        let html = '';
+        let html = '<div style="margin-top: 10px;">';
         this.devices.forEach(device => {
             const selected = this.selectedDevice && this.selectedDevice.address === device.address;
-            html += `<div class="mui-panel" style="padding: 10px; margin-bottom: 5px; cursor: pointer;
-                        background: ${selected ? '#e3f2fd' : '#fff'}; border: 1px solid ${selected ? '#2196f3' : '#ddd'};"
-                        onclick="CrsfParams.selectDevice(${JSON.stringify(device).replace(/"/g, '&quot;')})">
-                        <strong>${device.name}</strong><br>
-                        <small style="color: #666;">Address: 0x${device.address.toString(16).toUpperCase()}</small><br>
-                        <small style="color: #666;">Params: ${device.parametersTotal}</small>
-                    </div>`;
+            const deviceJson = JSON.stringify(device).replace(/"/g, '&quot;');
+            html += `
+                <div class="device-item" onclick="CrsfParams.selectDevice(${deviceJson})" style="
+                    padding: 12px;
+                    margin-bottom: 8px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    cursor: pointer;
+                    background: ${selected ? '#e3f2fd' : '#fff'};
+                ">
+                    <div style="font-weight: bold; margin-bottom: 4px;">${device.name}</div>
+                    <div style="font-size: 0.85em; color: #666;">
+                        ID: 0x${device.address.toString(16).toUpperCase()}<br/>
+                        Params: ${device.parametersTotal}
+                    </div>
+                </div>
+            `;
         });
+        html += '</div>';
         container.innerHTML = html;
     },
 
@@ -1392,9 +1404,7 @@ const CrsfParams = {
         let html = '<table class="mui-table" style="width: 100%;">';
         params.forEach(param => {
             html += '<tr>';
-            html += `<td style="width: 40%; vertical-align: middle;"><strong>${param.name}</strong>`;
-            if (param.unit) html += ` <small style="color: #666;">(${param.unit})</small>`;
-            html += '</td>';
+            html += `<td style="width: 40%; font-weight: 500; vertical-align: middle;">${param.name}</td>`;
             html += '<td style="width: 60%;">';
             html += this.renderParamControl(param);
             html += '</td></tr>';
@@ -1408,38 +1418,77 @@ const CrsfParams = {
         switch (param.type) {
             case CRSF.PARAM_TYPE_UINT8:
             case CRSF.PARAM_TYPE_INT8:
-                return `<input type="number" value="${param.value}" min="${param.min}" max="${param.max}"
-                        class="mui-textfield" style="width: 80px;"
-                        onchange="CrsfParams.updateParameter(${param.number}, parseInt(this.value))">`;
+                const unit = param.unit ? ` <span style="color: #666; font-size: 0.9em;">${param.unit}</span>` : '';
+                return `
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <input type="number"
+                            value="${param.value}"
+                            min="${param.min}"
+                            max="${param.max}"
+                            onchange="CrsfParams.updateParameter(${param.number}, parseInt(this.value))"
+                            style="flex: 1; padding: 6px; border: 1px solid #ddd; border-radius: 4px; max-width: 100px;">
+                        ${unit}
+                        <span style="color: #999; font-size: 0.85em;">[${param.min}-${param.max}]</span>
+                    </div>
+                `;
 
             case CRSF.PARAM_TYPE_TEXT_SELECTION:
+                const selUnit = param.unit ? ` <span style="color: #666; font-size: 0.9em;">${param.unit}</span>` : '';
                 let options = '';
                 param.options.forEach((opt, i) => {
                     options += `<option value="${i}" ${i === param.value ? 'selected' : ''}>${opt}</option>`;
                 });
-                return `<select class="mui-select" onchange="CrsfParams.updateParameter(${param.number}, parseInt(this.value))">${options}</select>`;
+                return `
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <select onchange="CrsfParams.updateParameter(${param.number}, parseInt(this.value))"
+                            style="flex: 1; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+                            ${options}
+                        </select>
+                        ${selUnit}
+                    </div>
+                `;
 
             case CRSF.PARAM_TYPE_FOLDER:
-                return `<button class="mui-btn mui-btn--small mui-btn--primary"
-                        onclick="CrsfParams.navigateToFolder(${param.number}, '${param.name.replace(/'/g, "\\'")}')">
-                        Open &rarr;</button>`;
+                return `<button class="mui-btn mui-btn--small" onclick="CrsfParams.navigateToFolder(${param.number}, '${param.name.replace(/'/g, "\\'")}')">
+                        Enter
+                    </button>`;
 
             case CRSF.PARAM_TYPE_INFO:
                 return `<span style="color: #666;">${param.value || ''}</span>`;
 
             case CRSF.PARAM_TYPE_COMMAND:
                 const statusText = param.status === 0 ? 'Ready' : (param.status === 1 ? 'Running...' : 'Done');
-                return `<button class="mui-btn mui-btn--small"
-                        onclick="CrsfParams.updateParameter(${param.number}, 0)"
+                return `<button class="mui-btn mui-btn--small mui-btn--primary"
+                        onclick="CrsfParams.executeCommand(${param.number}, '${param.name.replace(/'/g, "\\'")}')"
                         ${param.status === 1 ? 'disabled' : ''}>${param.value || 'Execute'}</button>
                         <small style="color: #666; margin-left: 10px;">${statusText}</small>`;
 
             case CRSF.PARAM_TYPE_STRING:
-                return `<span style="color: #666;">${param.value || ''}</span>`;
+                return `
+                    <input type="text"
+                        value="${param.value || ''}"
+                        onchange="CrsfParams.updateParameter(${param.number}, this.value)"
+                        style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+                `;
 
             default:
                 return `<span style="color: #999;">Unsupported type (${param.type})</span>`;
         }
+    },
+
+    // Execute a command parameter with confirmation
+    executeCommand: function(paramNumber, paramName) {
+        cuteAlert({
+            type: 'question',
+            title: 'Execute Command',
+            message: `Execute "${paramName}"?`,
+            confirmText: 'Execute',
+            cancelText: 'Cancel'
+        }).then((result) => {
+            if (result === 'confirm') {
+                this.updateParameter(paramNumber, 0);
+            }
+        });
     }
 };
 
