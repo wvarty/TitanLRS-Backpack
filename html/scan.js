@@ -1033,8 +1033,8 @@ const CrsfParams = {
 
     // Handle parameter entry response
     handleParamEntry: function(frame) {
-        // Ignore if not loading or no device selected
-        if (!this.isLoading || !this.selectedDevice) return;
+        // Accept responses during initial loading OR during reload operations
+        if ((!this.isLoading && !this.reloadSingleCallback) || !this.selectedDevice) return;
 
         // Verify this response is from our selected device
         if (frame.origin !== this.selectedDevice.address) {
@@ -1077,16 +1077,24 @@ const CrsfParams = {
             const param = this.parseParameter(paramNumber, fullData);
             if (param) {
                 this.parameters[paramNumber] = param;
-                this.loadedCount++;
-                this.updateLoadingProgress();
+                if (this.isLoading) {
+                    this.loadedCount++;
+                    this.updateLoadingProgress();
+                }
             }
 
+            // If we have a reload single callback (reloading after write), call it
+            if (this.reloadSingleCallback) {
+                const callback = this.reloadSingleCallback;
+                this.reloadSingleCallback = null;
+                callback();
+            }
             // If we have a retry callback (retrying missing params), call it
-            if (this.retryMissingCallback) {
+            else if (this.retryMissingCallback) {
                 const callback = this.retryMissingCallback;
                 this.retryMissingCallback = null;
                 callback();
-            } else {
+            } else if (this.isLoading) {
                 // Normal sequential loading - request next parameter if not done
                 if (this.loadedCount < this.parameterCount) {
                     this.requestNextParameter();
@@ -1257,7 +1265,8 @@ const CrsfParams = {
     // Request a specific parameter chunk
     requestParameter: function(paramNum, chunkNum) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-        if (!this.isLoading) return;
+        // Allow requests during initial loading OR during reload (when reloadSingleCallback is set)
+        if (!this.isLoading && !this.reloadSingleCallback) return;
 
         this.pendingParamNumber = paramNum;
         this.pendingChunkNumber = chunkNum;
@@ -1275,7 +1284,14 @@ const CrsfParams = {
 
     // Handle parameter request timeout with retry logic
     handleParameterTimeout: function(paramNum, chunkNum) {
-        console.warn('Parameter request timeout for param', paramNum, 'chunk', chunkNum, 'retry', this.retryCount);
+        // If we're reloading a single parameter (after write), don't retry - just skip it
+        if (this.reloadSingleCallback) {
+            this.pendingChunks = [];
+            const callback = this.reloadSingleCallback;
+            this.reloadSingleCallback = null;
+            callback();
+            return;
+        }
 
         if (this.retryCount < this.maxRetries) {
             // Retry the same parameter
@@ -1384,7 +1400,11 @@ const CrsfParams = {
 
     // Navigate to a folder
     navigateToFolder: function(folderId, folderName) {
-        this.folderStack.push({ id: this.currentFolder, name: folderName });
+        this.folderStack.push({
+            id: folderId,           // The folder we're navigating TO (for label updates)
+            parentId: this.currentFolder,  // The folder we came FROM (for navigation back)
+            name: folderName
+        });
         this.currentFolder = folderId;
         this.updateBreadcrumb();
         this.renderParameters();
@@ -1394,7 +1414,7 @@ const CrsfParams = {
     navigateBack: function() {
         if (this.folderStack.length > 0) {
             const prev = this.folderStack.pop();
-            this.currentFolder = prev.id;
+            this.currentFolder = prev.parentId;  // Go back to the parent
             this.updateBreadcrumb();
             this.renderParameters();
         }
@@ -1439,8 +1459,86 @@ const CrsfParams = {
         const frame = CRSF.buildFrame(CRSF.PARAM_WRITE, this.selectedDevice.address, this.originAddress, serialized);
         this.ws.send(frame);
 
-        // Update local value optimistically (no full reload needed)
+        // Update local value optimistically
         param.value = value;
+
+        // Reload related fields after write (like the LUA script does)
+        // Wait a short time for EEPROM to commit, then reload
+        setTimeout(() => {
+            this.reloadRelatedFields(param);
+        }, 200);
+    },
+
+    // Reload the current field and related fields after a parameter write
+    // This mimics the behavior of reloadRelatedFields() in the ELRS LUA script
+    reloadRelatedFields: function(param) {
+        // Don't reload if we're still loading or if there's already a reload in progress
+        if (this.isLoading || this.reloadSingleCallback || !this.selectedDevice) {
+            return;
+        }
+
+        const reloadQueue = [];
+
+        // Reload the parent folder to update its description
+        if (param.parentFolder && param.parentFolder > 0) {
+            const parentParam = this.parameters[param.parentFolder];
+            if (parentParam) {
+                reloadQueue.push(param.parentFolder);
+            }
+        }
+
+        // Reload all editable fields at the same level
+        this.parameters.forEach((p, idx) => {
+            if (!p || idx === 0) return; // Skip empty slots and index 0
+
+            // Skip the current field (will be added at the end)
+            if (idx === param.number) return;
+
+            // Only reload fields in the same folder that are editable
+            if (p.parentFolder === param.parentFolder) {
+                const isEditable = p.type < CRSF.PARAM_TYPE_STRING || p.type === CRSF.PARAM_TYPE_FOLDER;
+                if (isEditable) {
+                    reloadQueue.push(idx);
+                }
+            }
+        });
+
+        // Reload the current field last
+        reloadQueue.push(param.number);
+
+        // Start reloading the queue
+        this.reloadQueuedParameters(reloadQueue, 0);
+    },
+
+    // Reload a queue of parameters sequentially
+    reloadQueuedParameters: function(queue, index) {
+        if (index >= queue.length) {
+            // Done reloading, refresh the UI
+            // Update folder names in the breadcrumb stack
+            // When a folder parameter is reloaded, its name may have changed (e.g., "TX Power (25mW)" -> "TX Power (50mW)")
+            this.folderStack.forEach((folder, idx) => {
+                const param = this.parameters[folder.id];
+                if (param && param.name !== folder.name) {
+                    this.folderStack[idx].name = param.name;
+                }
+            });
+            this.updateBreadcrumb();
+
+            this.renderParameters();
+            return;
+        }
+
+        const paramNum = queue[index];
+        this.pendingChunks = [];
+        this.pendingParamNumber = paramNum;
+        this.pendingChunkNumber = 0;
+
+        // Set a callback to continue with the next parameter after this one completes
+        this.reloadSingleCallback = () => {
+            this.reloadQueuedParameters(queue, index + 1);
+        };
+
+        this.requestParameter(paramNum, 0);
     },
 
     // Render device list
