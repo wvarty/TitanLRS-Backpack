@@ -1619,7 +1619,10 @@ const CrsfParams = {
                 const selUnit = param.unit ? ` <span style="color: #666; font-size: 0.9em;">${param.unit}</span>` : '';
                 let options = '';
                 param.options.forEach((opt, i) => {
-                    options += `<option value="${i}" ${i === param.value ? 'selected' : ''}>${opt}</option>`;
+                    // Skip empty or whitespace-only options (like the ELRS LUA script does)
+                    if (opt.trim().length > 0) {
+                        options += `<option value="${i}" ${i === param.value ? 'selected' : ''}>${opt}</option>`;
+                    }
                 });
                 return `
                     <div style="display: flex; align-items: center; gap: 10px;">
