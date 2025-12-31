@@ -827,6 +827,7 @@ const CRSF = {
     ADDR_RADIO_TRANSMITTER: 0xEA,
     ADDR_RX: 0xEC,
     ADDR_TX: 0xEE,
+    ADDR_ELRS_LUA: 0xEF,
 
     // Parameter types
     PARAM_TYPE_UINT8: 0x00,
@@ -1008,13 +1009,15 @@ const CrsfParams = {
             return;
         }
 
-        // Parse ELRS status structure (matching LUA lines 503-511):
+        // Parse ELRS status structure (matching LUA):
         // uint8_t pktsBad        (offset 0)
         // uint16_t pktsGood      (offset 1-2, big-endian)
         // uint8_t flags          (offset 3)
         // char msg[]             (offset 4+, null-terminated string)
 
-        // We only care about flags and message for error handling
+        // Extract bad/good packet counts (matching LUA lines 503-504)
+        const badPkt = payload[0];
+        const goodPkt = (payload[1] * 256) + payload[2];  // Big-endian uint16
         const newFlags = payload[3];
 
         // Extract error message if present (starts at offset 4)
@@ -1022,6 +1025,28 @@ const CrsfParams = {
         if (payload.length > 4) {
             const msgResult = CRSF.readString(payload, 4);
             msg = msgResult.value;
+        }
+
+        // Update the Bad/Good counter display (matching LUA line 514)
+        // LUA shows "badPkt/goodPkt   state" where state is "C" if connected, "-" otherwise
+        // LUA line 513: bit32.btest(elrsFlags, 1) checks if bit 0 (0x01) is set
+        const isConnected = (newFlags & 0x01);  // bit 0 indicates connected
+
+        // Create styled outline chip components using MUI colors
+        const connectionChip = isConnected
+            ? '<span style="display: inline-block; padding: 2px 12px; border-radius: 16px; background-color: transparent; border: 1px solid #4caf50; color: #4caf50; font-size: 0.75em; margin-right: 8px;">RX Connected</span>'
+            : '<span style="display: inline-block; padding: 2px 12px; border-radius: 16px; background-color: transparent; border: 1px solid #f44336; color: #f44336; font-size: 0.75em; margin-right: 8px;">RX Disconnected</span>';
+
+        const counterChip = `<span style="display: inline-block; padding: 2px 12px; border-radius: 16px; background-color: transparent; border: 1px solid #9e9e9e; color: #9e9e9e; font-size: 0.75em;">${badPkt}/${goodPkt}</span>`;
+
+        const linkstatElement = _('params_linkstat');
+        const statusRow = _('params_status');
+        if (linkstatElement) {
+            linkstatElement.innerHTML = connectionChip + counterChip;
+            // Show the status row when we have link stats
+            if (statusRow) {
+                statusRow.style.display = 'block';
+            }
         }
 
         // If flags are changing, show popup immediately (matching LUA line 507-510)
@@ -1071,6 +1096,10 @@ const CrsfParams = {
         const parametersTotal = payload[offset++];
         const parameterVersion = payload[offset++];
 
+        // Check if this is an ELRS device (matching LUA line 406)
+        // SerialNumber = 'ELRS' = 0x454C5253
+        const isElrs = serialNumber === 0x454C5253;
+
         const device = {
             name,
             address: frame.origin,
@@ -1078,7 +1107,8 @@ const CrsfParams = {
             hardwareId,
             firmwareId,
             parametersTotal,
-            parameterVersion
+            parameterVersion,
+            isElrs
         };
 
         // Update or add device to list
@@ -1298,6 +1328,23 @@ const CrsfParams = {
         _('params_device_name').textContent = device.name;
         _('reload_params').disabled = false;
         _('params_breadcrumb').style.display = 'none';
+
+        // Set correct handset ID (matching LUA lines 385-386)
+        // deviceIsELRS_TX = device.isElrs and devId == 0xEE or nil
+        // handsetId = deviceIsELRS_TX and 0xEF or 0xEA
+        const deviceIsELRS_TX = device.isElrs && device.address === CRSF.ADDR_TX;
+        this.originAddress = deviceIsELRS_TX ? CRSF.ADDR_ELRS_LUA : CRSF.ADDR_RADIO_TRANSMITTER;
+
+        // Clear linkstat display and hide status row until we start polling
+        const linkstatElement = _('params_linkstat');
+        const statusRow = _('params_status');
+        if (linkstatElement) {
+            linkstatElement.textContent = '';
+        }
+        if (statusRow) {
+            statusRow.style.display = 'none';
+        }
+
         this.renderDeviceList();
         this.loadParameters();
     },
@@ -1749,6 +1796,16 @@ const CrsfParams = {
         if (this.linkstatPollInterval) {
             clearInterval(this.linkstatPollInterval);
             this.linkstatPollInterval = null;
+
+            // Clear linkstat display and hide status row when polling stops
+            const linkstatElement = _('params_linkstat');
+            const statusRow = _('params_status');
+            if (linkstatElement) {
+                linkstatElement.textContent = '';
+            }
+            if (statusRow) {
+                statusRow.style.display = 'none';
+            }
         }
     },
 
