@@ -819,6 +819,7 @@ const CRSF = {
     PARAM_ENTRY: 0x2B,
     PARAM_READ: 0x2C,
     PARAM_WRITE: 0x2D,
+    ELRS_STATUS: 0x2E,
 
     // Addresses
     ADDR_BROADCAST: 0x00,
@@ -929,6 +930,11 @@ const CrsfParams = {
     scanTimeout: null,
     paramTimeout: null,
     originAddress: CRSF.ADDR_RADIO_TRANSMITTER,
+    commandPopup: null,           // Currently executing command
+    commandPollInterval: null,    // Interval for polling command status
+    linkstatPollInterval: null,   // Interval for polling link statistics
+    elrsFlags: 0,                 // Current ELRS status flags (matching LUA)
+    elrsFlagsInfo: '',            // Current ELRS error message (matching LUA)
 
     // Initialize the parameters UI (only once)
     init: function() {
@@ -958,11 +964,9 @@ const CrsfParams = {
             this.ws = new WebSocket('ws://' + window.location.hostname + '/crsf');
             this.ws.binaryType = 'arraybuffer';
             this.ws.onopen = () => {
-                console.log('CRSF WebSocket connected');
                 resolve();
             };
             this.ws.onclose = () => {
-                console.log('CRSF WebSocket closed');
                 this.ws = null;
             };
             this.ws.onerror = (e) => {
@@ -986,6 +990,62 @@ const CrsfParams = {
             case CRSF.PARAM_ENTRY:
                 this.handleParamEntry(frame);
                 break;
+            case CRSF.ELRS_STATUS:
+                this.handleELRSStatus(frame);
+                break;
+        }
+    },
+
+    // Handle ELRS status messages (including error popups)
+    // Matching LUA parseElrsInfoMessage behavior (lines 496-515)
+    handleELRSStatus: function(frame) {
+        if (!this.selectedDevice || frame.origin !== this.selectedDevice.address) {
+            return;
+        }
+
+        const payload = frame.payload;
+        if (payload.length < 4) {
+            return;
+        }
+
+        // Parse ELRS status structure (matching LUA lines 503-511):
+        // uint8_t pktsBad        (offset 0)
+        // uint16_t pktsGood      (offset 1-2, big-endian)
+        // uint8_t flags          (offset 3)
+        // char msg[]             (offset 4+, null-terminated string)
+
+        // We only care about flags and message for error handling
+        const newFlags = payload[3];
+
+        // Extract error message if present (starts at offset 4)
+        let msg = '';
+        if (payload.length > 4) {
+            const msgResult = CRSF.readString(payload, 4);
+            msg = msgResult.value;
+        }
+
+        // If flags are changing, show popup immediately (matching LUA line 507-510)
+        const flagsChanged = newFlags !== this.elrsFlags;
+
+        // Update stored flags and message
+        this.elrsFlags = newFlags;
+        this.elrsFlagsInfo = msg;
+
+        // Show error popup if flags indicate warning/error (> 0x1F) and flags changed
+        // Matching LUA line 708: if elrsFlags > 0x1F then
+        if (flagsChanged && newFlags > 0x1F && msg && msg.length > 0) {
+            cuteAlert({
+                type: 'error',
+                title: 'Error',
+                message: msg,
+                confirmText: 'OK'
+            }).then(() => {
+                // When user acknowledges error, send command to clear it
+                // Matching LUA line 710: crossfireTelemetryPush(0x2D, { deviceId, handsetId, 0x2E, 0x00 })
+                const clearCmd = new Uint8Array([0x2E, 0x00]);
+                const clearFrame = CRSF.buildFrame(CRSF.PARAM_WRITE, this.selectedDevice.address, this.originAddress, clearCmd);
+                this.ws.send(clearFrame);
+            });
         }
     },
 
@@ -1033,11 +1093,8 @@ const CrsfParams = {
 
     // Handle parameter entry response
     handleParamEntry: function(frame) {
-        // Accept responses during initial loading OR during reload operations
-        if ((!this.isLoading && !this.reloadSingleCallback) || !this.selectedDevice) return;
-
         // Verify this response is from our selected device
-        if (frame.origin !== this.selectedDevice.address) {
+        if (!this.selectedDevice || frame.origin !== this.selectedDevice.address) {
             return;
         }
 
@@ -1049,8 +1106,10 @@ const CrsfParams = {
         const chunkData = payload.slice(2);
 
         // Verify this is the response we're waiting for
-        if (paramNumber !== this.pendingParamNumber) {
-            console.warn('Unexpected param response:', paramNumber, 'expected:', this.pendingParamNumber);
+        // Accept if it matches pending param OR if it's a command we're polling
+        const isCommandPoll = this.commandPopup && paramNumber === this.commandPopup.paramNumber;
+        if (paramNumber !== this.pendingParamNumber && !isCommandPoll) {
+            console.warn('Unexpected param response:', paramNumber, 'expected:', this.pendingParamNumber, 'command poll:', isCommandPoll);
             return;
         }
 
@@ -1080,6 +1139,11 @@ const CrsfParams = {
                 if (this.isLoading) {
                     this.loadedCount++;
                     this.updateLoadingProgress();
+                }
+
+                // Handle command status updates
+                if (param.type === CRSF.PARAM_TYPE_COMMAND && this.commandPopup && this.commandPopup.paramNumber === paramNumber) {
+                    this.handleCommandStatusUpdate(param);
                 }
             }
 
@@ -1224,6 +1288,10 @@ const CrsfParams = {
 
     // Select a device
     selectDevice: function(device) {
+        // Stop any active polling
+        this.stopCommandPolling();
+        this.stopLinkstatPolling();
+
         this.selectedDevice = device;
         this.currentFolder = 0;
         this.folderStack = [];
@@ -1343,7 +1411,6 @@ const CrsfParams = {
     retryMissingParameters: function() {
         if (this.missingParams.size > 0) {
             const missing = Array.from(this.missingParams);
-            console.log('Retrying missing parameters:', missing);
             this.missingParams.clear();  // Clear for this retry pass
             this.retryMissingParamsArray(missing, 0);
         } else {
@@ -1396,6 +1463,9 @@ const CrsfParams = {
         _('params_loading').style.display = 'none';
         _('params_content').style.display = 'block';
         this.renderParameters();
+
+        // Start continuous link statistics polling (matching LUA behavior)
+        this.startLinkstatPolling();
     },
 
     // Navigate to a folder
@@ -1643,11 +1713,9 @@ const CrsfParams = {
                 return `<span style="color: #666;">${param.value || ''}</span>`;
 
             case CRSF.PARAM_TYPE_COMMAND:
-                const statusText = param.status === 0 ? 'Ready' : (param.status === 1 ? 'Running...' : 'Done');
+                // Don't change button text/state - just show the value like LUA does
                 return `<button class="mui-btn mui-btn--primary"
-                        onclick="CrsfParams.executeCommand(${param.number}, '${param.name.replace(/'/g, "\\'")}')"
-                        ${param.status === 1 ? 'disabled' : ''}>${param.value || 'Execute'}</button>
-                        <small style="color: #666; margin-left: 10px;">${statusText}</small>`;
+                        onclick="CrsfParams.executeCommand(${param.number}, '${param.name.replace(/'/g, "\\'")}')">${param.value || 'Execute'}</button>`;
 
             case CRSF.PARAM_TYPE_STRING:
                 return `
@@ -1662,19 +1730,145 @@ const CrsfParams = {
         }
     },
 
-    // Execute a command parameter with confirmation
+    // Start continuous link statistics polling (like ELRS LUA does)
+    startLinkstatPolling: function() {
+        // Don't poll if already polling
+        if (this.linkstatPollInterval) return;
+
+        // Poll every 1 second (matching LUA's 100 ticks)
+        this.linkstatPollInterval = setInterval(() => {
+            this.pollLinkstat();
+        }, 1000);
+
+        // Do initial poll immediately
+        this.pollLinkstat();
+    },
+
+    // Stop link statistics polling
+    stopLinkstatPolling: function() {
+        if (this.linkstatPollInterval) {
+            clearInterval(this.linkstatPollInterval);
+            this.linkstatPollInterval = null;
+        }
+    },
+
+    // Poll link statistics by requesting parameter 0 (matching LUA behavior)
+    pollLinkstat: function() {
+        if (!this.selectedDevice || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            this.stopLinkstatPolling();
+            return;
+        }
+
+        // Request link statistics by sending PARAM_WRITE to param 0 with value 0
+        // LUA line 567: crossfireTelemetryPush(0x2D, { deviceId, handsetId, 0x0, 0x0 })
+        // This triggers the firmware to send back an ELRS_STATUS (0x2E) frame
+        const payload = new Uint8Array([0, 0]);
+        const frame = CRSF.buildFrame(CRSF.PARAM_WRITE, this.selectedDevice.address, this.originAddress, payload);
+        this.ws.send(frame);
+    },
+
+    // Execute a command parameter
     executeCommand: function(paramNumber, paramName) {
-        cuteAlert({
-            type: 'question',
-            title: 'Execute Command',
-            message: `Execute "${paramName}"?`,
-            confirmText: 'Execute',
-            cancelText: 'Cancel'
-        }).then((result) => {
-            if (result === 'confirm') {
-                this.updateParameter(paramNumber, 0);
+        const param = this.parameters[paramNumber];
+        if (!param || param.type !== CRSF.PARAM_TYPE_COMMAND) {
+            return;
+        }
+
+        // Start the command execution by sending status=1
+        const serialized = new Uint8Array([paramNumber, 1]);
+        const frame = CRSF.buildFrame(CRSF.PARAM_WRITE, this.selectedDevice.address, this.originAddress, serialized);
+        this.ws.send(frame);
+
+        // Track the executing command
+        this.commandPopup = {
+            paramNumber: paramNumber,
+            paramName: paramName,
+            timeout: param.timeout || 50  // Use parameter timeout, default to 50 (0.5s) like LUA
+        };
+
+        // Poll command status using the parameter's timeout value (in 10ms units)
+        // LUA uses timeout directly as ticks (10ms each), so multiply by 10 for milliseconds
+        // IMPORTANT: LUA waits for the timeout period BEFORE the first poll (line 352)
+        // Don't poll immediately - let the interval handle it
+        const pollInterval = this.commandPopup.timeout * 10;
+        this.commandPollInterval = setInterval(() => {
+            this.pollCommandStatus(paramNumber);
+        }, pollInterval);
+    },
+
+    // Poll the status of an executing command by requesting the parameter
+    pollCommandStatus: function(paramNumber) {
+        if (!this.commandPopup || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            this.stopCommandPolling();
+            return;
+        }
+
+        // Poll command status by sending PARAM_WRITE with status=6 (lcsQuery)
+        // LUA line 558: crossfireTelemetryPush(0x2D, { deviceId, handsetId, fieldPopup.id, 6 })
+        const payload = new Uint8Array([paramNumber, 6]);
+        const frame = CRSF.buildFrame(CRSF.PARAM_WRITE, this.selectedDevice.address, this.originAddress, payload);
+        this.ws.send(frame);
+    },
+
+    // Stop polling command status
+    stopCommandPolling: function() {
+        if (this.commandPollInterval) {
+            clearInterval(this.commandPollInterval);
+            this.commandPollInterval = null;
+        }
+        this.commandPopup = null;
+    },
+
+    // Handle command status updates (matching LUA runPopupPage behavior)
+    handleCommandStatusUpdate: function(param) {
+        const status = param.status;
+
+        // Status 0: Command stopped (matching LUA line 786-789)
+        if (status === 0) {
+            this.stopCommandPolling();
+            return;
+        }
+
+        // Status 2: Command running (matching LUA line 800-810)
+        if (status === 2) {
+            // Could show a running indicator here if desired
+            return;
+        }
+
+        // Status 3: Confirmation required (matching LUA line 790-799)
+        if (status === 3) {
+            // Stop polling while waiting for user response (LUA stops polling when status=3)
+            if (this.commandPollInterval) {
+                clearInterval(this.commandPollInterval);
+                this.commandPollInterval = null;
             }
-        });
+
+            cuteAlert({
+                type: 'question',
+                title: 'Confirmation Required',
+                message: param.value || 'Press OK to confirm',
+                confirmText: 'OK',
+                cancelText: 'Cancel'
+            }).then((result) => {
+                if (result === 'confirm') {
+                    // Send status=4 (confirmed) - matching LUA line 794-796
+                    const serialized = new Uint8Array([param.number, 4]);
+                    const frame = CRSF.buildFrame(CRSF.PARAM_WRITE, this.selectedDevice.address, this.originAddress, serialized);
+                    this.ws.send(frame);
+
+                    // Resume polling
+                    const pollInterval = this.commandPopup.timeout * 10;
+                    this.commandPollInterval = setInterval(() => {
+                        this.pollCommandStatus(param.number);
+                    }, pollInterval);
+                } else {
+                    // LUA just clears fieldPopup when cancelling confirmation (line 797-798)
+                    // Does NOT send status=5 for confirmation cancel
+                    this.commandPopup = null;
+                }
+            });
+            return;
+        }
     }
 };
 
