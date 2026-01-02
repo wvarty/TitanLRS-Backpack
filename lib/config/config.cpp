@@ -55,6 +55,7 @@ TxBackpackConfig::SetDefaults()
     m_config.mavlinkListenPort = 14555;  // Default MavLink listen port
     m_config.mavlinkSendPort = 14550;    // Default MavLink send port
     m_config.wifiApSsid[0] = 0;          // Empty string = use default SSID
+    m_config.wifiApPassword[0] = 0;      // Empty string = use default password
     m_config.telemMode = BACKPACK_TELEM_MODE_WIFI;
     m_config.wifiService = WIFI_SERVICE_MAVLINK_TX;
     m_config.startWiFi = true;
@@ -123,6 +124,13 @@ TxBackpackConfig::SetWiFiApSSID(const char *ssid)
     strcpy(m_config.wifiApSsid, ssid);
     m_modified = true;
 }
+
+void
+TxBackpackConfig::SetWiFiApPassword(const char *password)
+{
+    strcpy(m_config.wifiApPassword, password);
+    m_modified = true;
+}
 #endif
 
 /////////////////////////////////////////////////////
@@ -184,7 +192,8 @@ VrxBackpackConfig::SetDefaults()
 {
     memset(&m_config, 0, sizeof(m_config));
     m_config.version = VRX_BACKPACK_CONFIG_VERSION | VRX_BACKPACK_CONFIG_MAGIC;
-    m_config.wifiApSsid[0] = 0;  // Empty string = use default SSID
+    m_config.wifiApSsid[0] = 0;       // Empty string = use default SSID
+    m_config.wifiApPassword[0] = 0;   // Empty string = use default password
 
 #if defined(AAT_BACKPACK)
     m_config.aat.satelliteHomeMin = 5;
@@ -244,6 +253,13 @@ void
 VrxBackpackConfig::SetWiFiApSSID(const char *ssid)
 {
     strcpy(m_config.wifiApSsid, ssid);
+    m_modified = true;
+}
+
+void
+VrxBackpackConfig::SetWiFiApPassword(const char *password)
+{
+    strcpy(m_config.wifiApPassword, password);
     m_modified = true;
 }
 
@@ -396,7 +412,8 @@ TimerBackpackConfig::SetDefaults()
     m_config.ssid[0] = 0;
     m_config.password[0] = 0;
     memset(m_config.address, 0, 6);
-    m_config.wifiApSsid[0] = 0;  // Empty string = use default SSID
+    m_config.wifiApSsid[0] = 0;       // Empty string = use default SSID
+    m_config.wifiApPassword[0] = 0;   // Empty string = use default password
     m_modified = true;
     Commit();
 }
@@ -440,6 +457,13 @@ void
 TimerBackpackConfig::SetWiFiApSSID(const char *ssid)
 {
     strcpy(m_config.wifiApSsid, ssid);
+    m_modified = true;
+}
+
+void
+TimerBackpackConfig::SetWiFiApPassword(const char *password)
+{
+    strcpy(m_config.wifiApPassword, password);
     m_modified = true;
 }
 #endif

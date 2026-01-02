@@ -7,9 +7,9 @@
 #define VRX_BACKPACK_CONFIG_MAGIC   (0b10U << 30)
 #define TIMER_BACKPACK_CONFIG_MAGIC (0b11U << 30)
 
-#define TX_BACKPACK_CONFIG_VERSION      5
-#define VRX_BACKPACK_CONFIG_VERSION     6
-#define TIMER_BACKPACK_CONFIG_VERSION   4
+#define TX_BACKPACK_CONFIG_VERSION      6
+#define VRX_BACKPACK_CONFIG_VERSION     7
+#define TIMER_BACKPACK_CONFIG_VERSION   5
 
 
 typedef enum {
@@ -37,6 +37,7 @@ typedef struct {
     uint16_t          mavlinkListenPort;
     uint16_t          mavlinkSendPort;
     char              wifiApSsid[33];
+    char              wifiApPassword[65];
 } tx_backpack_config_t;
 
 class TxBackpackConfig
@@ -56,6 +57,7 @@ public:
     uint16_t GetMavlinkListenPort() const { return m_config.mavlinkListenPort; }
     uint16_t GetMavlinkSendPort() const { return m_config.mavlinkSendPort; }
     char    *GetWiFiApSSID() { return m_config.wifiApSsid; }
+    char    *GetWiFiApPassword() { return m_config.wifiApPassword; }
 
     // Setters
     void SetStorageProvider(ELRS_EEPROM *eeprom);
@@ -69,6 +71,7 @@ public:
     void SetMavlinkListenPort(uint16_t port);
     void SetMavlinkSendPort(uint16_t port);
     void SetWiFiApSSID(const char *ssid);
+    void SetWiFiApPassword(const char *password);
 
 private:
     tx_backpack_config_t    m_config;
@@ -91,6 +94,7 @@ typedef struct {
     char        password[65];
     uint8_t     address[6];
     char        wifiApSsid[33];
+    char        wifiApPassword[65];
 #if defined(HAS_HEADTRACKING)
     int         compassCalibration[3][2];
     float       imuCalibration[3];
@@ -133,6 +137,7 @@ public:
     char    *GetPassword() { return m_config.password; }
     uint8_t *GetGroupAddress() { return m_config.address; }
     char    *GetWiFiApSSID() { return m_config.wifiApSsid; }
+    char    *GetWiFiApPassword() { return m_config.wifiApPassword; }
 
     // Setters
     void SetStorageProvider(ELRS_EEPROM *eeprom);
@@ -143,6 +148,7 @@ public:
     void SetPassword(const char *ssid);
     void SetGroupAddress(const uint8_t address[6]);
     void SetWiFiApSSID(const char *ssid);
+    void SetWiFiApPassword(const char *password);
 
 #if defined(HAS_HEADTRACKING)
     int     (*GetCompassCalibration())[3][2] { return &m_config.compassCalibration; }
@@ -199,6 +205,7 @@ typedef struct {
     char        password[65];
     uint8_t     address[6];
     char        wifiApSsid[33];
+    char        wifiApPassword[65];
 } timer_backpack_config_t;
 
 class TimerBackpackConfig
@@ -215,6 +222,7 @@ public:
     char    *GetPassword() { return m_config.password; }
     uint8_t *GetGroupAddress() { return m_config.address; }
     char    *GetWiFiApSSID() { return m_config.wifiApSsid; }
+    char    *GetWiFiApPassword() { return m_config.wifiApPassword; }
 
     // Setters
     void SetStorageProvider(ELRS_EEPROM *eeprom);
@@ -225,6 +233,7 @@ public:
     void SetPassword(const char *ssid);
     void SetGroupAddress(const uint8_t address[6]);
     void SetWiFiApSSID(const char *ssid);
+    void SetWiFiApPassword(const char *password);
 
 private:
     timer_backpack_config_t m_config;

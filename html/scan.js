@@ -146,6 +146,11 @@ function updateConfig(data) {
         _('ap_ssid').value = config['ap_ssid'];
     }
 
+    // Update AP password field with current value
+    if (config['ap_password']) {
+        _('ap_password').value = config['ap_password'];
+    }
+
     updateAatConfig(config);
 }
 
@@ -549,6 +554,61 @@ _('ap_ssid_reset').addEventListener('click', function() {
     const formData = new FormData();
     formData.append('ap_ssid', '___DEFAULT___');
     xmlhttp.send(formData);
+});
+_('setappassword').addEventListener('submit', callback("WiFi AP Password Updated", "An error occurred updating the AP Password", "/setappassword", function() {
+    return new FormData(_('setappassword'));
+}));
+_('ap_password_reset').addEventListener('click', function() {
+    // Reset to default by clearing the custom password
+    const xmlhttp = new XMLHttpRequest();
+    xmlhttp.onreadystatechange = function() {
+        if (this.readyState == 4) {
+            if (this.status == 200) {
+                cuteAlert({
+                    type: "info",
+                    title: "Reset to Default",
+                    message: "AP password has been reset to default. Changes will take effect on next AP mode activation."
+                });
+                // Fetch updated config and refresh the password field
+                const configHttp = new XMLHttpRequest();
+                configHttp.onreadystatechange = function() {
+                    if (this.readyState == 4 && this.status == 200) {
+                        const data = JSON.parse(this.responseText);
+                        if (data.config && data.config.ap_password) {
+                            _('ap_password').value = data.config.ap_password;
+                        }
+                    }
+                };
+                configHttp.open('GET', '/config', true);
+                configHttp.send();
+            } else {
+                cuteAlert({
+                    type: "error",
+                    title: "Reset to Default",
+                    message: "An error occurred resetting the AP password"
+                });
+            }
+        }
+    };
+    xmlhttp.open('POST', '/setappassword', true);
+    const formData = new FormData();
+    formData.append('ap_password', '___DEFAULT___');
+    xmlhttp.send(formData);
+});
+_('ap_password_toggle').addEventListener('click', function() {
+    const passwordInput = _('ap_password');
+    const eyeIcon = _('ap_password_eye');
+    const eyeOffIcon = _('ap_password_eye_off');
+
+    if (passwordInput.type === 'password') {
+        passwordInput.type = 'text';
+        eyeIcon.style.display = 'none';
+        eyeOffIcon.style.display = 'block';
+    } else {
+        passwordInput.type = 'password';
+        eyeIcon.style.display = 'block';
+        eyeOffIcon.style.display = 'none';
+    }
 });
 _('connect').addEventListener('click', callback("Connect to Home Network", "An error occurred connecting to the Home network", "/connect", null));
 _('access').addEventListener('click', callback("Access Point", "An error occurred starting the Access Point", "/access", null));

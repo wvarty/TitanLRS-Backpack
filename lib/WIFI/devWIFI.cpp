@@ -76,7 +76,8 @@ static char wifi_ap_ssid[33]; // will be set by user config or default
 #else
 #error Unknown target
 #endif
-static const char *wifi_ap_password = "expresslrs";
+static const char *wifi_ap_default_password = "expresslrs";
+static char wifi_ap_password[65]; // will be set by user config or default
 
 // Helper function to get the default AP SSID based on backpack type and service
 static void getDefaultApSsid(char* buffer, size_t bufferSize)
@@ -358,6 +359,14 @@ static void GetConfiguration(AsyncWebServerRequest *request)
     json["config"]["ap_ssid"] = defaultSsid;
   }
 
+  // Send the custom AP password if configured, otherwise send the default password
+  const char* customApPassword = config.GetWiFiApPassword();
+  if (customApPassword[0] != 0) {
+    json["config"]["ap_password"] = customApPassword;
+  } else {
+    json["config"]["ap_password"] = wifi_ap_default_password;
+  }
+
 #if defined(HAS_HEADTRACKING) || defined(SUPPORT_HEADTRACKING)
   json["config"]["head-tracking"] = true;
 #endif
@@ -487,6 +496,32 @@ static void WebUpdateSetApSSID(AsyncWebServerRequest *request)
   config.Commit();
 
   sendResponse(request, "WiFi AP SSID updated successfully. Changes will take effect on next AP mode activation.");
+}
+
+static void WebUpdateSetApPassword(AsyncWebServerRequest *request)
+{
+  String ap_password = request->arg("ap_password");
+
+  // Check for reset to default marker
+  if (ap_password == "___DEFAULT___") {
+    DBGLN("Resetting AP password to default");
+    config.SetWiFiApPassword("");  // Empty string = use default
+    config.Commit();
+    sendResponse(request, "WiFi AP password reset to default. Changes will take effect on next AP mode activation.");
+    return;
+  }
+
+  // Validate password length (WPA2 requires 8-63 characters)
+  if (ap_password.length() < 8 || ap_password.length() > 63) {
+    sendResponse(request, "Error: Password must be between 8 and 63 characters");
+    return;
+  }
+
+  DBGLN("Setting AP password");
+  config.SetWiFiApPassword(ap_password.c_str());
+  config.Commit();
+
+  sendResponse(request, "WiFi AP password updated successfully. Changes will take effect on next AP mode activation.");
 }
 
 static void WebUpdateHandleNotFound(AsyncWebServerRequest *request)
@@ -815,6 +850,7 @@ static void startServices()
   server.on("/networks.json", WebUpdateSendNetworks);
   server.on("/sethome", WebUpdateSetHome);
   server.on("/setapssid", WebUpdateSetApSSID);
+  server.on("/setappassword", WebUpdateSetApPassword);
   #if defined(MAVLINK_ENABLED)
   server.on("/setmavlink", WebUpdateSetMavLink);
   #endif
@@ -919,6 +955,13 @@ static void HandleWebUpdate()
         } else {
           // Fall back to default SSID based on backpack type
           getDefaultApSsid(wifi_ap_ssid, sizeof(wifi_ap_ssid));
+        }
+        // Use custom password if configured, otherwise use default
+        const char* customPassword = config.GetWiFiApPassword();
+        if (customPassword[0] != 0) {
+          strcpy(wifi_ap_password, customPassword);
+        } else {
+          strcpy(wifi_ap_password, wifi_ap_default_password);
         }
         WiFi.softAP(wifi_ap_ssid, wifi_ap_password);
         WiFi.scanNetworks(true);
